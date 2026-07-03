@@ -30,3 +30,6 @@ __pycache__/
 
 # Jupyter / test artifacts
 *.log
+
+# local-only notes
+CLAUDE.md
