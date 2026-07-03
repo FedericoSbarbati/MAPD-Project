@@ -1,3 +1,31 @@
 archive/
 MAPD covid project.pdf
 InstructionsAndGuidelines_MAPD2026_v1.pdf
+
+# macOS
+.DS_Store
+**/.DS_Store
+
+# temporary / swap files
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+*.orig
+
+# editor / notebook checkpoints
+.ipynb_checkpoints/
+**/.ipynb_checkpoints/
+.vscode/
+**/.vscode/
+
+# Python cache / local artifacts
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Jupyter / test artifacts
+*.log
