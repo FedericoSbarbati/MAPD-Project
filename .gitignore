@@ -1,4 +1,6 @@
 archive/
+data/
+data_sample/
 MAPD covid project.pdf
 InstructionsAndGuidelines_MAPD2026_v1.pdf
 CLAUDE.md
@@ -33,3 +35,8 @@ __pycache__/
 
 # local-only notes
 CLAUDE.md
+
+# Kaggle API credentials (SECRET — never commit)
+.kaggle/
+kaggle.json
+**/kaggle.json
