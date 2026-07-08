@@ -36,6 +36,9 @@ __pycache__/
 # local-only notes
 CLAUDE.md
 
+# per-machine Dask cluster node list (IP dei worker) — local-only
+cluster.txt
+
 # Kaggle API credentials (SECRET — never commit)
 .kaggle/
 kaggle.json
