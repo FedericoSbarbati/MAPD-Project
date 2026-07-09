@@ -30,7 +30,9 @@ SUBNET="${SUBNET:-10.67.22.0/24}"       # subnet interna del progetto: a chi e' 
 CHECK_FILE="${CHECK_FILE:-$MOUNT/MAPD-Project/archive/metadata.csv}"  # file di prova per la verifica finale
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CLUSTER_TXT="$REPO_DIR/cluster.txt"
-SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=10 -o BatchMode=yes"
+# IP effimeri e riciclati tra VM diverse -> non memorizzare le host key (come SSHCluster con
+# known_hosts=None): niente falsi allarmi "REMOTE HOST IDENTIFICATION HAS CHANGED" a ogni sessione.
+SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=10 -o BatchMode=yes"
 
 # IP interno dello scheduler (i worker useranno questo per montare l'NFS)
 SCHED_IP="$(hostname -I | tr ' ' '\n' | grep -E '^10\.67\.22\.' | head -n1)"
