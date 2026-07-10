@@ -30,8 +30,10 @@ CORD19_WORKERS / CORD19_THREADS_PER_WORKER / CORD19_WORKER_MEMORY_LIMIT / CORD19
   DIAG_N            n. partizioni per la smoke run (fase E)     (default 24)
   DIAG_RG_FILES     quanti file bronze aprire per la fase A     (default 48)
   DIAG_NFS_MB       MB (uncompressed) del test di throughput D  (default 128)
-  CORD19_MALLOC_FIX 1 = costruisci il cluster CON la cura (MALLOC_TRIM_THRESHOLD_=0,
-                    MALLOC_ARENA_MAX=2) -> per l'A/B test della fase E (default off)
+  CORD19_MALLOC_FIX 1 = env MALLOC_TRIM_THRESHOLD_=0 via worker_options['env'] (NON funziona su
+                    SSHCluster: va in pre-spawn-environ; lasciato per documentazione)  (default off)
+  CORD19_TRIM_PLUGIN 1 = registra il WorkerPlugin che fa malloc_trim(0) ogni ~2s: LA cura robusta
+                    -> A/B test della fase E (default off). CORD19_TRIM_EVERY_S regola l'intervallo
 
 Fasi (ognuna stampa da sola, si possono disabilitare con DIAG_PHASES):
   A  struttura row-group del bronze (verifica: gruppi piccoli o monster?)
@@ -461,13 +463,53 @@ def phase_E(client):
 
 
 # ================================================================================ main
-# A/B TEST DELLA CURA: CORD19_MALLOC_FIX=1 costruisce il cluster con l'env che dice a glibc di
-# restituire la memoria liberata all'OS (MALLOC_TRIM_THRESHOLD_=0) e di limitare le arene
-# (MALLOC_ARENA_MAX=2). Rigira la fase E con e senza e confronta il picco: e' la prova che il fix
-# elimina la frammentazione, prima di toccare il notebook. Il Nanny setta questo env NEL processo
-# worker PRIMA che glibc inizializzi (verificato: Nanny accetta 'env', SSHCluster lo inoltra).
-MALLOC_FIX = os.environ.get("CORD19_MALLOC_FIX", "").lower() in ("1", "true", "yes", "on")
-MALLOC_ENV = {"MALLOC_TRIM_THRESHOLD_": "0", "MALLOC_ARENA_MAX": "2"}
+# DUE cure A/B-testabili, entrambe da confrontare col picco della fase E "nuda":
+#
+#  CORD19_MALLOC_FIX=1  -> env MALLOC_TRIM_THRESHOLD_=0 nei worker via worker_options['env'].
+#     ATTENZIONE: si e' visto NON funzionare su SSHCluster: MALLOC_TRIM_THRESHOLD_ deve stare in
+#     `distributed.nanny.pre-spawn-environ` (letto PRIMA che glibc init), non nel parametro `env`
+#     (applicato troppo tardi). Lo lascio per documentare il tentativo; non e' la cura buona.
+#
+#  CORD19_TRIM_PLUGIN=1 -> registra un WorkerPlugin che chiama malloc_trim(0) ogni ~2s su ogni
+#     worker. E' la cura ROBUSTA: aggira il problema del pre-spawn e usa esattamente la chiamata
+#     che in fase E ha restituito 1.1GB. Nessun env, funziona su qualunque cluster.
+MALLOC_FIX  = os.environ.get("CORD19_MALLOC_FIX", "").lower() in ("1", "true", "yes", "on")
+TRIM_PLUGIN = os.environ.get("CORD19_TRIM_PLUGIN", "").lower() in ("1", "true", "yes", "on")
+TRIM_EVERY_S = float(os.environ.get("CORD19_TRIM_EVERY_S", "2.0"))
+MALLOC_ENV  = {"MALLOC_TRIM_THRESHOLD_": "0", "MALLOC_ARENA_MAX": "2"}
+
+
+def register_trim_plugin(client, interval_s=2.0):
+    """WorkerPlugin: PeriodicCallback che fa malloc_trim(0) ogni interval_s su ogni worker.
+    Tiene l'RSS basso restituendo all'OS le pagine libere frammentate (quelle che l'auto-trim
+    di glibc non ridà). Registrato via client -> si applica anche ai worker gia' avviati."""
+    from distributed.diagnostics.plugin import WorkerPlugin
+
+    class _TrimMemory(WorkerPlugin):
+        name = "trim-memory"
+
+        def __init__(self, every_s):
+            self.every_s = every_s
+
+        def setup(self, worker):
+            import ctypes, ctypes.util
+            from tornado.ioloop import PeriodicCallback
+            libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6")
+            trim = getattr(libc, "malloc_trim", None)   # glibc-only: no-op su libc non-glibc (macOS)
+            if trim is None:
+                return
+            pc = PeriodicCallback(lambda: trim(0), self.every_s * 1000)
+            worker._trim_pc = pc                      # tienilo vivo
+            worker.loop.add_callback(pc.start)        # avvia sul loop del worker
+
+        def teardown(self, worker):
+            try:
+                worker._trim_pc.stop()
+            except Exception:
+                pass
+
+    client.register_plugin(_TrimMemory(interval_s))
+    print(f"trim-plugin: ON (malloc_trim(0) ogni {interval_s}s su ogni worker)")
 
 
 def build_client():
@@ -523,6 +565,8 @@ def main():
         client, cluster = build_client()
         try:
             print("dashboard:", getattr(client, "dashboard_link", "n/d"))
+            if TRIM_PLUGIN:
+                register_trim_plugin(client, TRIM_EVERY_S)
             if "D" in PHASES:
                 phase_D(client)
             if "E" in PHASES:          # E: la diagnosi critica (managed vs unmanaged + malloc_trim)
