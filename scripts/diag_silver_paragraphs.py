@@ -64,8 +64,20 @@ RG_FILES    = int(os.environ.get("DIAG_RG_FILES", "48"))
 NFS_MB      = int(os.environ.get("DIAG_NFS_MB", "128"))
 
 # cluster (stessa logica del notebook)
+def _read_cluster_txt():
+    """Legge la prima riga non-commento di cluster.txt: 'ip_sched,ip_sched,ip_w1,...'
+    (come read_cluster_hosts nel notebook). Cosi' lo script costruisce il cluster VERO
+    senza passare nessun IP a mano. Ritorna None se il file non c'e'."""
+    path = os.path.join(REPO, "cluster.txt")
+    if os.path.exists(path):
+        for line in open(path):
+            line = line.strip()
+            if line and not line.startswith("#"):
+                return line
+    return None
+
 DASK_SCHEDULER     = os.environ.get("DASK_SCHEDULER")
-CORD19_HOSTS       = os.environ.get("CORD19_HOSTS")
+CORD19_HOSTS       = os.environ.get("CORD19_HOSTS") or _read_cluster_txt()
 CORD19_SSH_KEY     = os.environ.get("CORD19_SSH_KEY")
 N_WORKERS          = int(os.environ.get("CORD19_WORKERS", "4"))
 THREADS_PER_WORKER = int(os.environ.get("CORD19_THREADS_PER_WORKER", "4"))
