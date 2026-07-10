@@ -26,17 +26,19 @@ Come si usa (sullo scheduler della VM, dentro l'env mapd-covid):
 
 Env utili (oltre a quelle del notebook: DASK_SCHEDULER / CORD19_HOSTS / CORD19_SSH_KEY /
 CORD19_WORKERS / CORD19_THREADS_PER_WORKER / CORD19_WORKER_MEMORY_LIMIT / CORD19_DATA):
-  DIAG_PHASES   sottoinsieme di "ABCDE" da eseguire            (default "ABCDE")
-  DIAG_N        n. partizioni per la smoke run (fase E)        (default 24)
-  DIAG_RG_FILES quanti file bronze aprire per la fase A        (default 48)
-  DIAG_NFS_MB   MB (uncompressed) del test di throughput D     (default 128)
+  DIAG_PHASES       sottoinsieme di "ABCDE" da eseguire        (default "ABCDE")
+  DIAG_N            n. partizioni per la smoke run (fase E)     (default 24)
+  DIAG_RG_FILES     quanti file bronze aprire per la fase A     (default 48)
+  DIAG_NFS_MB       MB (uncompressed) del test di throughput D  (default 128)
+  CORD19_MALLOC_FIX 1 = costruisci il cluster CON la cura (MALLOC_TRIM_THRESHOLD_=0,
+                    MALLOC_ARENA_MAX=2) -> per l'A/B test della fase E (default off)
 
 Fasi (ognuna stampa da sola, si possono disabilitare con DIAG_PHASES):
-  A  struttura row-group del bronze  -> la MISURA DECISIVA (row-group piccoli o monster?)
+  A  struttura row-group del bronze (verifica: gruppi piccoli o monster?)
   B  npartitions del read del silver + distribuzione taglia partizioni (da metadata)
   C  probe RAM di UNA partizione: quanto pesa in pandas la partizione piu' grande
-  D  throughput di scrittura NFS vs disco locale (quantifica l'ipotesi "NFS lento")
-  E  smoke run limitata (prime DIAG_N partizioni) del transform reale, con MemorySampler
+  D  throughput di scrittura NFS vs disco locale, DAL WORKER (ipotesi "NFS lento")
+  E  smoke run limitata + forensics: managed/unmanaged + malloc_trim (LA diagnosi)
 --------------------------------------------------------------------------------
 """
 import os
@@ -58,7 +60,7 @@ REPORTS   = os.path.join(REPO, "reports")
 os.makedirs(DIAG_ROOT, exist_ok=True)
 os.makedirs(REPORTS, exist_ok=True)
 
-PHASES      = os.environ.get("DIAG_PHASES", "ABCDEF").upper()
+PHASES      = os.environ.get("DIAG_PHASES", "ABCDE").upper()
 DIAG_N      = int(os.environ.get("DIAG_N", "24"))
 RG_FILES    = int(os.environ.get("DIAG_RG_FILES", "48"))
 NFS_MB      = int(os.environ.get("DIAG_NFS_MB", "128"))
@@ -454,55 +456,30 @@ def phase_E(client):
         print(f"  get_worker_logs fallito: {e}")
 
 
-# ============================================================ FASE F: set pmc_uids nel graph
-# Verifica se il set (~105k id) viene INLINATO nel graph per-task (cattura nella closure) invece
-# di essere scatterato una volta. Se il graph 'inline' e' molto piu' grande dello 'scatter', il
-# set moltiplica per numero di partizioni -> pressione su scheduler e worker. Cura: client.scatter.
-def phase_F(client):
-    hr("FASE F  --  il set pmc_uids nel task graph: inline (closure) vs scatter")
-    import pandas as pd, dask.dataframe as dd, cloudpickle
-    # carrier SINTETICO: la domanda ('il set e' duplicato per-task?') non dipende dai dati veri.
-    # Usare il read_parquet reale (1024 file NFS) rende dict(__dask_graph__())+pickle lentissimo
-    # (trascina l'intero dataset) -> qui uso from_pandas: graph piccolo, misura istantanea.
-    n = min(DIAG_N, 64)
-    base = dd.from_pandas(pd.DataFrame({"source": ["pdf"] * n,
-                                        "cord_uid": [f"x{i}" for i in range(n)]}),
-                          npartitions=n)
-    fake = {f"id{i:07d}" for i in range(105000)}          # taglia realistica del set reale
-    print(f"  set realistico: {len(fake)} id  |  pickle {human(len(pickle.dumps(fake)))}  su {n} partizioni")
-
-    def keep(pdf, s):
-        return pdf[(pdf["source"] == "pmc") | (~pdf["cord_uid"].isin(s))]
-
-    def _graph_bytes(coll):
-        try:
-            return len(cloudpickle.dumps(dict(coll.__dask_graph__())))
-        except Exception as e:
-            return f"errore ({type(e).__name__})"
-
-    sz_inline = _graph_bytes(base.map_partitions(keep, fake, meta=base._meta))   # set nel graph
-    fut = client.scatter(fake, broadcast=True)                                  # set scatterato 1 volta
-    sz_sc = _graph_bytes(base.map_partitions(keep, fut, meta=base._meta))
-    print(f"  graph con set INLINE : {human(sz_inline) if isinstance(sz_inline,int) else sz_inline}")
-    print(f"  graph con set SCATTER: {human(sz_sc) if isinstance(sz_sc,int) else sz_sc}")
-    if isinstance(sz_inline, int) and isinstance(sz_sc, int):
-        if sz_inline > sz_sc * 2:
-            print(f"  [DIAGNOSI F] il set e' inlinato piu' volte (~{sz_inline/max(sz_sc,1):.0f}x): "
-                  f"usa client.scatter(pmc_uids, broadcast=True) nel silver_paragraphs.")
-        else:
-            print(f"  [DIAGNOSI F] il set NON e' duplicato in modo significativo: non e' questa la causa.")
-    try:
-        client.cancel(fut)
-    except Exception:
-        pass
+# NB: la vecchia "fase F" (set pmc_uids inline vs scatter) e' stata RIMOSSA: la fase E ha mostrato
+# managed=0 e set=573KB -> il set non c'entra con l'OOM; inoltre il pickling del graph si impiantava.
 
 
 # ================================================================================ main
+# A/B TEST DELLA CURA: CORD19_MALLOC_FIX=1 costruisce il cluster con l'env che dice a glibc di
+# restituire la memoria liberata all'OS (MALLOC_TRIM_THRESHOLD_=0) e di limitare le arene
+# (MALLOC_ARENA_MAX=2). Rigira la fase E con e senza e confronta il picco: e' la prova che il fix
+# elimina la frammentazione, prima di toccare il notebook. Il Nanny setta questo env NEL processo
+# worker PRIMA che glibc inizializzi (verificato: Nanny accetta 'env', SSHCluster lo inoltra).
+MALLOC_FIX = os.environ.get("CORD19_MALLOC_FIX", "").lower() in ("1", "true", "yes", "on")
+MALLOC_ENV = {"MALLOC_TRIM_THRESHOLD_": "0", "MALLOC_ARENA_MAX": "2"}
+
+
 def build_client():
     """Stessa logica del notebook: DASK_SCHEDULER -> Client; CORD19_HOSTS -> SSHCluster;
     altrimenti LocalCluster. Ritorna (client, cluster) o (None, None) se non servono worker."""
     from dask.distributed import Client, LocalCluster
+    print(f"malloc-fix: {'ON ' + str(MALLOC_ENV) if MALLOC_FIX else 'off (cluster come il notebook attuale)'}")
     if DASK_SCHEDULER:
+        # collegamento a scheduler esistente: NON posso cambiare l'env dei worker gia' avviati.
+        if MALLOC_FIX:
+            print("  ATTENZIONE: con DASK_SCHEDULER i worker esistono gia' -> CORD19_MALLOC_FIX ignorato.")
+            print("  Per testare la cura usa il cluster.txt (SSHCluster), non un scheduler gia' su.")
         print(f"cluster: Client({DASK_SCHEDULER})")
         return Client(DASK_SCHEDULER), None
     if CORD19_HOSTS:
@@ -511,11 +488,15 @@ def build_client():
         connect = {"known_hosts": None}
         if CORD19_SSH_KEY:
             connect["client_keys"] = [CORD19_SSH_KEY]
+        wopts = {"nthreads": THREADS_PER_WORKER, "memory_limit": WORKER_MEM}
+        if MALLOC_FIX:
+            wopts["env"] = MALLOC_ENV        # Nanny(env=...) -> env del processo worker
         print(f"cluster: SSHCluster({hosts}) mem={WORKER_MEM} thr={THREADS_PER_WORKER}")
-        cl = SSHCluster(hosts, connect_options=connect,
-                        worker_options={"nthreads": THREADS_PER_WORKER, "memory_limit": WORKER_MEM},
+        cl = SSHCluster(hosts, connect_options=connect, worker_options=wopts,
                         scheduler_options={"port": 8786, "dashboard_address": ":8787"})
         return Client(cl), cl
+    if MALLOC_FIX:
+        os.environ.update(MALLOC_ENV)        # LocalCluster: i nanny figli ereditano l'env del padre
     print(f"cluster: LocalCluster(n_workers={N_WORKERS}, mem={WORKER_MEM}, thr={THREADS_PER_WORKER})")
     cl = LocalCluster(n_workers=N_WORKERS, threads_per_worker=THREADS_PER_WORKER,
                       memory_limit=WORKER_MEM, processes=True)
@@ -544,10 +525,8 @@ def main():
             print("dashboard:", getattr(client, "dashboard_link", "n/d"))
             if "D" in PHASES:
                 phase_D(client)
-            if "E" in PHASES:          # E prima di F: e' la diagnosi critica (managed vs unmanaged)
+            if "E" in PHASES:          # E: la diagnosi critica (managed vs unmanaged + malloc_trim)
                 phase_E(client)
-            if "F" in PHASES:
-                phase_F(client)
         finally:
             # scollega SOLO questo client (se DASK_SCHEDULER, il cluster del notebook resta vivo).
             # close() del LocalCluster a volte va in timeout sul teardown dei nanny: lo assorbo,
