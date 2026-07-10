@@ -201,45 +201,56 @@ def phase_C():
 
 
 # ============================================================ FASE D: throughput NFS vs locale
-# Scrive lo STESSO parquet (zstd, come il codice vero) su NFS e su /tmp locale e cronometra.
-# Se NFS << locale, la scrittura e' il collo di bottiglia: le partizioni finite restano in RAM
-# in attesa di essere scritte (overproduction) -> memoria che sale = la tua ipotesi.
-def phase_D():
-    hr("FASE D  --  throughput scrittura: NFS (volume dati) vs disco locale")
-    import numpy as np
-    # ~NFS_MB di dati 'realistici': stringhe di testo tipo paragrafo
-    nrows = max(1, NFS_MB * 1024 * 1024 // 200)
-    pdf = pd.DataFrame({
-        "cord_uid": ["abcd1234"] * nrows,
-        "text": ["lorem ipsum dolor sit amet " * 6] * nrows,
-    })
-    tbl = pa.Table.from_pandas(pdf, preserve_index=False)
-    in_mem = pdf.memory_usage(deep=True).sum()
-    print(f"  payload: {nrows} righe, ~{human(in_mem)} in RAM")
+# ATTENZIONE ai due tranelli (versione precedente sbagliata su entrambi):
+#  (1) il volume e' attaccato allo SCHEDULER: per il DRIVER /data e' disco LOCALE, per i WORKER e'
+#      NFS. La pipeline scrive dai worker -> misuro DAL worker (client.run), non dal driver.
+#  (2) dati tutti-uguali -> zstd li comprime a ~nulla e la misura e' finta: uso testo VARIATO cosi'
+#      il file compresso ha una taglia realistica e la scrittura tocca davvero il disco/rete.
+def phase_D(client):
+    hr("FASE D  --  throughput scrittura DAL WORKER: NFS (/data) vs disco locale (/tmp)")
 
-    def _bench(path, label):
-        t0 = time.time()
-        pq.write_table(tbl, path, compression="zstd")
-        # forza il flush su disco/rete: senza fsync misuro solo la cache di pagina
-        fd = os.open(path, os.O_RDONLY); os.fsync(fd); os.close(fd)
-        dt = time.time() - t0
-        disk = os.path.getsize(path)
-        print(f"  {label:10s} {dt:6.2f}s  ->  {human(disk)} su disco  |  "
-              f"{disk/1e6/dt:6.1f} MB/s (compressi)")
-        os.remove(path)
-        return dt
+    def _bench(nfs_dir, mb):
+        import os, time, random, string, socket
+        import numpy as np, pandas as pd, pyarrow as pa, pyarrow.parquet as pq
+        rng = np.random.default_rng(0)
+        nrows = max(1000, mb * 1024 * 1024 // 400)
+        vocab = ["".join(random.choices(string.ascii_lowercase, k=6)) for _ in range(4000)]
+        text = [" ".join(rng.choice(vocab, size=40)) for _ in range(nrows)]   # ~280B/riga, VARIATO
+        tbl = pa.Table.from_pandas(pd.DataFrame({"cord_uid": ["abcd1234"] * nrows, "text": text}),
+                                   preserve_index=False)
+        res = {"host": socket.gethostname(), "nrows": nrows}
+        for label, d in (("NFS", nfs_dir), ("locale", "/tmp")):
+            os.makedirs(d, exist_ok=True)
+            p = os.path.join(d, "diag_wbench.parquet")
+            t0 = time.time()
+            pq.write_table(tbl, p, compression="zstd")
+            fd = os.open(p, os.O_RDONLY); os.fsync(fd); os.close(fd)   # flush vero (non page cache)
+            dt = time.time() - t0
+            sz = os.path.getsize(p); os.remove(p)
+            res[label] = (dt, sz)
+        return res
 
-    nfs_path   = os.path.join(DIAG_ROOT, "nfs_probe.parquet")
-    local_path = os.path.join("/tmp", "diag_local_probe.parquet")
     try:
-        t_nfs   = _bench(nfs_path,   "NFS")
-        t_local = _bench(local_path, "locale/tmp")
-        ratio = t_nfs / max(t_local, 1e-6)
-        print(f"\n  [DIAGNOSI D] NFS e' {ratio:.1f}x {'PIU LENTO' if ratio>1.5 else 'circa uguale'} del locale.")
-        if ratio > 1.5:
-            print(f"              La scrittura su NFS e' il collo di bottiglia: mentre un worker scrive,")
-            print(f"              lo scheduler produce altre partizioni che restano in RAM in attesa")
-            print(f"              (backpressure). Con partizioni grandi (fasi A/C) = OOM. Conferma la tua ipotesi.")
+        workers = list(client.scheduler_info()["workers"])
+        if not workers:
+            print("  nessun worker: salto D"); return
+        out = client.run(_bench, DIAG_ROOT, NFS_MB, workers=[workers[0]])
+        res = next(iter(out.values()))
+        print(f"  eseguito su worker {res['host']}  ({res['nrows']} righe, testo variato)")
+        (t_nfs, sz_nfs), (t_loc, sz_loc) = res["NFS"], res["locale"]
+        print(f"  NFS      {t_nfs:6.2f}s -> {human(sz_nfs)}  |  {sz_nfs/1e6/max(t_nfs,1e-6):6.1f} MB/s")
+        print(f"  locale   {t_loc:6.2f}s -> {human(sz_loc)}  |  {sz_loc/1e6/max(t_loc,1e-6):6.1f} MB/s")
+        ratio = t_nfs / max(t_loc, 1e-6)
+        slow = ratio > 1.5
+        print(f"\n  [DIAGNOSI D] scrivere su NFS e' {ratio:.1f}x {'PIU LENTO' if slow else '~uguale a'} il locale.")
+        if slow:
+            print(f"              il sink e' lento: mentre un worker scrive una partizione, le letture")
+            print(f"              (veloci, partizioni piccole) corrono avanti e i risultati finiti")
+            print(f"              restano in RAM (managed) in attesa di uno slot di scrittura -> il")
+            print(f"              watermark sale. Vedi se la fase E dice 'MANAGED' (allora e' questo).")
+        else:
+            print(f"              NFS non e' molto piu' lento: la backpressure da sink e' meno probabile;")
+            print(f"              guarda la fase E (frammentazione/working-set).")
     except Exception as e:
         print(f"  !! test D fallito: {type(e).__name__}: {e}")
 
@@ -437,11 +448,14 @@ def phase_E(client):
 # set moltiplica per numero di partizioni -> pressione su scheduler e worker. Cura: client.scatter.
 def phase_F(client):
     hr("FASE F  --  il set pmc_uids nel task graph: inline (closure) vs scatter")
-    import dask.dataframe as dd
-    import cloudpickle
-    para = dd.read_parquet(BRONZE, engine="pyarrow", split_row_groups=True)
-    n = min(DIAG_N, para.npartitions)
-    sub = para.partitions[:n]
+    import pandas as pd, dask.dataframe as dd, cloudpickle
+    # carrier SINTETICO: la domanda ('il set e' duplicato per-task?') non dipende dai dati veri.
+    # Usare il read_parquet reale (1024 file NFS) rende dict(__dask_graph__())+pickle lentissimo
+    # (trascina l'intero dataset) -> qui uso from_pandas: graph piccolo, misura istantanea.
+    n = min(DIAG_N, 64)
+    base = dd.from_pandas(pd.DataFrame({"source": ["pdf"] * n,
+                                        "cord_uid": [f"x{i}" for i in range(n)]}),
+                          npartitions=n)
     fake = {f"id{i:07d}" for i in range(105000)}          # taglia realistica del set reale
     print(f"  set realistico: {len(fake)} id  |  pickle {human(len(pickle.dumps(fake)))}  su {n} partizioni")
 
@@ -454,11 +468,9 @@ def phase_F(client):
         except Exception as e:
             return f"errore ({type(e).__name__})"
 
-    g_inline = sub.map_partitions(keep, fake, meta=sub._meta)          # set catturato nel graph
-    sz_inline = _graph_bytes(g_inline)
-    fut = client.scatter(fake, broadcast=True)                        # set scatterato una volta
-    g_sc = sub.map_partitions(keep, fut, meta=sub._meta)
-    sz_sc = _graph_bytes(g_sc)
+    sz_inline = _graph_bytes(base.map_partitions(keep, fake, meta=base._meta))   # set nel graph
+    fut = client.scatter(fake, broadcast=True)                                  # set scatterato 1 volta
+    sz_sc = _graph_bytes(base.map_partitions(keep, fut, meta=base._meta))
     print(f"  graph con set INLINE : {human(sz_inline) if isinstance(sz_inline,int) else sz_inline}")
     print(f"  graph con set SCATTER: {human(sz_sc) if isinstance(sz_sc,int) else sz_sc}")
     if isinstance(sz_inline, int) and isinstance(sz_sc, int):
@@ -506,29 +518,38 @@ def main():
     if not os.path.isdir(BRONZE):
         sys.exit(f"!! {BRONZE} non esiste. Imposta CORD19_DATA alla root che contiene bronze/paragraphs.")
 
-    # A/B/C/D non hanno bisogno del cluster (solo driver + accesso file). E si'.
+    # A/B/C: solo driver + metadata parquet, niente cluster. D/E/F girano sui worker.
     if "A" in PHASES:
         phase_A()
     if "B" in PHASES:
         phase_B()
     if "C" in PHASES:
         phase_C()
-    if "D" in PHASES:
-        phase_D()
 
-    if "E" in PHASES or "F" in PHASES:
+    if any(p in PHASES for p in "DEF"):
         client, cluster = build_client()
         try:
             print("dashboard:", getattr(client, "dashboard_link", "n/d"))
+            if "D" in PHASES:
+                phase_D(client)
+            if "E" in PHASES:          # E prima di F: e' la diagnosi critica (managed vs unmanaged)
+                phase_E(client)
             if "F" in PHASES:
                 phase_F(client)
-            if "E" in PHASES:
-                phase_E(client)
         finally:
-            client.close()
+            # scollega SOLO questo client (se DASK_SCHEDULER, il cluster del notebook resta vivo).
+            # close() del LocalCluster a volte va in timeout sul teardown dei nanny: lo assorbo,
+            # i risultati sono gia' stampati sopra.
+            try:
+                client.close(timeout=10)
+            except Exception:
+                pass
             if cluster is not None:
-                cluster.close()
-            print("\ncluster chiuso.")
+                try:
+                    cluster.close(timeout=10)
+                except Exception:
+                    pass
+            print("\nclient scollegato.")
 
     hr("FINE DIAGNOSTICA")
     print("Report salvati in reports/: diag_silver_paragraphs_smoke.html, diag_worker_logs.txt")
