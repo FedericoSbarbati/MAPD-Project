@@ -40,6 +40,9 @@ CLAUDE.md
 # per-machine Dask cluster node list (IP dei worker) — local-only
 cluster.txt
 
+# laboratorio memory-leak locale (WIP, non committare per ora)
+scripts/leaklab.py
+
 # Kaggle API credentials (SECRET — never commit)
 .kaggle/
 kaggle.json
