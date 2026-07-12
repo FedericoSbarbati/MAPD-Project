@@ -1,0 +1,18 @@
+# Local environments
+.venv/
+
+# Generated outputs
+reports/
+dask-worker-space/
+.matplotlib/
+
+# Python/Jupyter cache
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# Local logs and scratch files
+*.log
+*.tmp
+*.temp
+.DS_Store

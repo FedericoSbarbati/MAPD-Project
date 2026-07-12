@@ -1,0 +1,23 @@
+name: mapd-covid
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - ipykernel
+  - jupyterlab
+  - notebook
+  - pandas
+  - pyarrow
+  - dask
+  - distributed
+  - matplotlib
+  - bokeh
+  - numpy
+  - psutil
+  - lz4
+  - zstandard
+  - asyncssh
+  - country_converter
+  - pip:
+      - kagglehub
