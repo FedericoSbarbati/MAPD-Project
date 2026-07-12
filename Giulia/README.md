@@ -10,6 +10,7 @@ dati restano nella struttura comune del progetto.
 - `notebooks/word_count_giulia_cloudveneto.ipynb`: run distribuito su CloudVeneto.
 - `scripts/word_count_dask.py`: implementazione MapReduce/Dask riusabile.
 - `scripts/run_word_count_cloudveneto.py`: avvio di `SSHCluster` e run completo.
+- `scripts/task_2_3_2_affiliation_representation.py`: paesi e istituti meglio/peggio rappresentati.
 - `scripts/setup_mapd_env.sh`: crea l'ambiente Python isolato in `Giulia/.venv`.
 - `requirements.txt` e `environment.yml`: dipendenze.
 
@@ -35,6 +36,48 @@ Giulia/reports/
 ```
 
 Quella cartella e' ignorata da Git.
+
+## Task 2.3.2: paesi e istituti
+
+Da root della repo:
+
+```bash
+python Giulia/scripts/task_2_3_2_affiliation_representation.py
+```
+
+Su CloudVeneto, se usi l'ambiente creato nella cartella Giulia:
+
+```bash
+/data/MAPD-Project/Giulia/.venv/bin/python \
+  /data/MAPD-Project/Giulia/scripts/task_2_3_2_affiliation_representation.py
+```
+
+Lo script legge:
+
+```text
+data/silver/paper_countries
+data/silver/paper_institutions
+```
+
+e scrive:
+
+```text
+Giulia/reports/task_2_3_2_affiliations/
+```
+
+Metriche principali:
+
+- `paper_count` per paese: numero di paper distinti in cui compare almeno
+  un'affiliazione di quel paese;
+- `paper_count` per istituto: numero di paper distinti in cui compare almeno
+  un'affiliazione di quell'istituto.
+
+Per vedere anche i conteggi per riga-autore, opzionali e meno robusti perche'
+possono sovrappesare paper con molti coautori, aggiungi:
+
+```bash
+--include-author-counts
+```
 
 ## Esecuzione locale
 
