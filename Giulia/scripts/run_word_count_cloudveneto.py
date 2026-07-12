@@ -141,6 +141,22 @@ def worker_probe(input_path: str, local_dir: str) -> dict[str, object]:
     }
 
 
+def ensure_word_count_module(module_dir: str) -> dict[str, object]:
+    import importlib
+    import socket
+    import sys
+
+    if module_dir not in sys.path:
+        sys.path.insert(0, module_dir)
+    importlib.invalidate_caches()
+    module = importlib.import_module("word_count_dask")
+    return {
+        "host": socket.gethostname(),
+        "module_file": getattr(module, "__file__", None),
+        "path_head": sys.path[:3],
+    }
+
+
 def memory_sweep() -> dict[str, object]:
     import ctypes
     import ctypes.util
@@ -255,6 +271,13 @@ def main(argv: list[str] | None = None) -> int:
                     + " ".join(worker_ips)
                     + "` on the scheduler VM, then retry."
                 )
+
+        module_dir = str(script_dir)
+        scheduler_module = client.run_on_scheduler(ensure_word_count_module, module_dir)
+        worker_modules = client.run(ensure_word_count_module, module_dir)
+        print("scheduler module   :", scheduler_module)
+        for address, module_info in worker_modules.items():
+            print("worker module      :", address, module_info)
 
         client.run(memory_sweep)
 
