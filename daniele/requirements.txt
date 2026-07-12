@@ -1,0 +1,21 @@
+# Task 2.3.3 - dependencies.
+#
+# NOTE: all of these are ALREADY INSTALLED in ~/pyvenv on every cluster node
+# (checked on scheduler + both workers on 2026-07-12). Nothing to install
+# before running the notebook on the VM.
+#
+# This file exists as documentation of the tested versions, and to reproduce
+# the environment elsewhere if ever needed:
+#     python3 -m pip install -r requirements.txt
+#
+# (python on the VMs: 3.10.12)
+
+dask[complete]==2026.6.0
+distributed==2026.6.0
+pandas==2.3.3
+numpy==2.2.6
+pyarrow==24.0.0
+matplotlib==3.10.9
+bokeh==3.9.1        # dask dashboard
+asyncssh==2.24.0    # SSHCluster (multi-node startup)
+notebook==7.6.0
