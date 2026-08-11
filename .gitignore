@@ -44,6 +44,10 @@ cluster.txt
 # laboratorio memory-leak locale (WIP, non committare per ora)
 scripts/leaklab.py
 
+# sandbox di sviluppo sul Mac: qui si costruiscono i task passo a passo prima di
+# promuoverli nelle cartelle personali — local-only, mai committato
+local/
+
 # Kaggle API credentials (SECRET — never commit)
 .kaggle/
 kaggle.json
