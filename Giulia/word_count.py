@@ -174,16 +174,44 @@ def add_count(total, doc_count):
     return total + doc_count[1]
 
 
-def word_count(paragraphs):
+def word_and_count(doc_count):
+    """((cord_uid, word), cp) -> (word, cp). Drops the document id before the Reduce."""
+    (_, word), count = doc_count
+    return word, count
+
+
+def word_count(paragraphs, split_out=0):
     """Bag of (cord_uid, text) -> the two Bags of the assignment, still lazy.
 
     Returns (doc_counts, global_counts):
         doc_counts     ((cord_uid, word), cp)   the Map phase output
         global_counts  (word, c)                the Reduce phase output
+
+    `split_out` chooses how the Reduce is executed. Both paths compute exactly the same
+    thing; they differ in how much memory the last task needs. See the comments below and
+    the README section on the reduction key.
     """
     # Map phase. Purely local: no data crosses the network here, and the number of
     # partitions is unchanged.
     doc_counts = paragraphs.map_partitions(document_counts)
+
+    if split_out:
+        # Sharded Reduce, for when the vocabulary does not fit in one worker.
+        # `foldby` cannot split its output, but a DataFrame groupby can: `split_out`
+        # hashes the words into that many partitions, so each final task holds roughly
+        # vocabulary/split_out entries instead of all of it. We come straight back to a
+        # Bag of (word, count) so everything downstream is unchanged.
+        # The assignment explicitly allows moving between the two structures.
+        #
+        # The task-based shuffle is not a preference: the P2P one cannot rebuild its
+        # spec on the scheduler for a graph that started life as a Bag, and the run dies
+        # with "P2P <id> failed during transfer phase" (a KeyError on the shuffle id).
+        dask.config.set({"dataframe.shuffle.method": "tasks"})
+        frame = doc_counts.map(word_and_count).to_dataframe(
+            meta={"word": "string", "count": "int64"}
+        )
+        summed = frame.groupby("word")["count"].sum(split_out=split_out).reset_index()
+        return doc_counts, summed.to_bag(format="tuple")
 
     # Reduce phase. Group the per-document pairs by word and sum their counts.
     # Foldby groups by the same word
@@ -227,6 +255,9 @@ def parse_args():
     parser.add_argument("--out", default=DEFAULT_OUTPUT, help=f"output directory (default {DEFAULT_OUTPUT})")
     parser.add_argument("--top", type=int, default=TOP_N, help="how many words to export and plot")
     parser.add_argument("--partitions", type=int, help="use only the first N partitions (smoke test)")
+    parser.add_argument("--split-out", type=int, default=0,
+                        help="shard the final reduce into N parts, for workers too small "
+                             "to hold the whole vocabulary in one task (0 = plain Bag foldby)")
     parser.add_argument("--keep-references", action="store_true", help="do not drop reference-like paragraphs")
     parser.add_argument("--check", action="store_true", help="also verify the Map/Reduce invariant (doubles the runtime)")
     return parser.parse_args()
@@ -234,21 +265,38 @@ def parse_args():
 
 def main():
     args = parse_args()
+
+    # Relative paths are resolved against the REPOSITORY, not the current directory:
+    # `python Giulia/word_count.py` and `cd Giulia && python word_count.py` must mean
+    # the same thing, otherwise the defaults point at Giulia/data_sample/... and the
+    # results land in Giulia/reports/.
+    repo = Path(__file__).resolve().parent.parent
+    source = Path(args.input)
+    source = source if source.is_absolute() else repo / source
     out = Path(args.out)
+    out = out if out.is_absolute() else repo / out
+
+    if not source.exists():
+        raise SystemExit(
+            f"Input non trovato: {source}\n"
+            "Passa il path del silver, per esempio:\n"
+            "  python Giulia/word_count.py ~/mapd-data/silver/paragraphs"
+        )
     out.mkdir(parents=True, exist_ok=True)
 
-    client, cluster = get_client(repo_root=Path(__file__).resolve().parent.parent)
-    print("dashboard:", client.dashboard_link)
-    print("input    :", args.input)
-    print("output   :", out)
+    client, cluster = get_client(repo_root=repo)
+    print("input     :", source)
+    print("output    :", out)
 
     paragraphs = read_paragraphs(
-        args.input,
+        source,
         drop_reference_like=not args.keep_references,
         npartitions=args.partitions,
     )
     print("partitions:", paragraphs.npartitions)
-    doc_counts, global_counts = word_count(paragraphs)
+    print("reduce    :", f"DataFrame groupby, split_out={args.split_out}"
+          if args.split_out else "Bag foldby (una sola partizione in uscita)")
+    doc_counts, global_counts = word_count(paragraphs, split_out=args.split_out)
 
     started = time.perf_counter()
     try:

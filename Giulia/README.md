@@ -27,6 +27,39 @@ silver/paragraphs ──► Bag di (cord_uid, text)
   global_counts = (word, c)
 ```
 
+## Il risultato
+
+Run completo sul corpus scaricato dalla VM (12.445.234 paragrafi), su Mac con
+`LocalCluster` a 3 worker × 4 thread: **1.128 s**, 785.753.529 occorrenze contate,
+vocabolario di **6.037.808** parole distinte.
+
+```
+   4.403.513  patients
+   3.911.578  covid-19      ← 2ª parola dell'intero corpus
+   3.280.997  study
+   2.980.002  data
+   2.359.949  using
+   ...
+   1.488.035  sars-cov-2    ← 18ª
+```
+
+Vale la pena fermarsi su `covid-19` e `sars-cov-2`: con un pattern `[a-z]+` ingenuo
+**nessuna delle due esisterebbe**, spezzate in `covid`+`19` e `sars`+`cov`+`2` con le
+cifre buttate via. La seconda parola più frequente del corpus è quella che la
+tokenizzazione più ovvia fa sparire.
+
+Il vocabolario cresce come previsto dalla legge di Heaps, ed è il motivo per cui ridurre
+sulla parola è sostenibile mentre ridurre su `(documento, parola)` non lo è:
+
+| dati | vocabolario |
+|---|---:|
+| campione | 177.534 |
+| 10% del corpus | 2.323.613 |
+| corpus completo | 6.037.808 (70,7 MB di stringhe) |
+
+Dieci volte i dati per 2,6 volte il vocabolario. Il 56,6% delle parole compare **una
+volta sola**: la coda è fatta di errori di OCR, identificativi e composti unici.
+
 ## Come si lancia
 
 Dalla root della repo. Dove gira lo decide `cluster.txt` (git-ignored), non il codice:

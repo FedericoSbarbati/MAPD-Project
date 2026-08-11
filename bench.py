@@ -32,16 +32,26 @@ HOSTS_FILE = "cluster.txt"
 
 
 def read_hosts(repo_root="."):
-    """The cluster host list, or None when we should run locally."""
+    """The cluster host list and where it came from: (hosts, source).
+
+    Returns (None, list_of_places_searched) when nothing was found, so the caller can
+    say WHERE it looked instead of silently running on one machine.
+    """
     if os.environ.get("CORD19_HOSTS"):
-        return os.environ["CORD19_HOSTS"]
-    path = os.path.join(repo_root, HOSTS_FILE)
-    if os.path.exists(path):
-        for line in open(path):
-            line = line.strip()
-            if line and not line.startswith("#"):
-                return line
-    return None
+        return os.environ["CORD19_HOSTS"], "$CORD19_HOSTS"
+
+    searched = []
+    for directory in (repo_root, os.getcwd(), os.path.expanduser("~")):
+        path = os.path.abspath(os.path.join(directory, HOSTS_FILE))
+        if path in searched:
+            continue
+        searched.append(path)
+        if os.path.exists(path):
+            for line in open(path):
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    return line, path
+    return None, searched
 
 
 def configure_memory():
@@ -60,6 +70,50 @@ def configure_memory():
     dask.config.set({"distributed.nanny.pre-spawn-environ": environ})
 
 
+def worker_options():
+    """Per-worker sizing, deliberately expressed in RELATIVE terms.
+
+    The cluster is rebuilt from a snapshot at every session and the VM flavour changes:
+    4 GB / 2 cores today, 8 GB tomorrow. So the defaults must adapt rather than name
+    absolute numbers - a hard-coded "7GB" on a 3.8 GB VM is silently ignored by the nanny
+    and the worker then believes it owns memory it does not have.
+
+    - nthreads: unset by default, so each node uses its own core count.
+    - memory_limit: a FRACTION of the node's RAM, leaving room for the OS and the NFS
+      client. Dask accepts a float as "this share of system memory".
+    """
+    options = {"memory_limit": float(os.environ.get("CORD19_WORKER_MEMORY_FRACTION", "0.85"))}
+    if os.environ.get("CORD19_WORKER_MEMORY_LIMIT"):
+        options["memory_limit"] = os.environ["CORD19_WORKER_MEMORY_LIMIT"]
+    if os.environ.get("CORD19_THREADS_PER_WORKER"):
+        options["nthreads"] = int(os.environ["CORD19_THREADS_PER_WORKER"])
+    return options
+
+
+def describe(client, mode, detail):
+    """Say out loud what we are actually running on.
+
+    This exists because the silent fallback to a local cluster is expensive: a run that
+    quietly uses one machine instead of four looks like a slow cluster, not like a
+    misconfiguration, and you only find out after wasting a session.
+    """
+    workers = client.scheduler_info()["workers"].values()
+    hosts = {w["host"] for w in workers}
+    total_memory = sum(w.get("memory_limit", 0) for w in workers)
+    print("=" * 70)
+    print(f"cluster   : {mode}")
+    print(f"            {detail}")
+    print(f"workers   : {len(workers)} su {len(hosts)} host {sorted(hosts)}")
+    print(f"threads   : {sum(w.get('nthreads', 0) for w in workers)}")
+    print(f"memoria   : {total_memory / 1e9:.1f} GB totali "
+          f"({total_memory / max(len(workers), 1) / 1e9:.1f} GB per worker)")
+    print(f"dashboard : {client.dashboard_link}")
+    if mode == "LocalCluster":
+        print("            ATTENZIONE: tutto su questa sola macchina. Per usare il")
+        print("            cluster serve cluster.txt nella root del repo.")
+    print("=" * 70)
+
+
 def get_client(repo_root="."):
     """Connect to whichever cluster this machine is configured for.
 
@@ -71,38 +125,57 @@ def get_client(repo_root="."):
     configure_memory()  # must happen before any worker process is spawned
 
     scheduler = os.environ.get("DASK_SCHEDULER")
-    hosts = read_hosts(repo_root)
-    threads = int(os.environ.get("CORD19_THREADS_PER_WORKER", "4"))
-    memory = os.environ.get("CORD19_WORKER_MEMORY_LIMIT", "7GB")
+    hosts, source = read_hosts(repo_root)
 
     if scheduler:
-        return Client(scheduler), None
+        client = Client(scheduler)
+        describe(client, "scheduler esistente", scheduler)
+        return client, None
 
     if hosts:
         from dask.distributed import SSHCluster
 
         addresses = [h.strip() for h in hosts.split(",") if h.strip()]
+        if len(addresses) < 2:
+            raise SystemExit(
+                f"{source} elenca un solo host ({addresses}). Il PRIMO host fa solo da\n"
+                "scheduler: servono almeno due voci perche' esista un worker. Ripeti lo\n"
+                "scheduler come secondo host se vuoi che lavori anche lui."
+            )
         connect = {"known_hosts": None}  # the internal IPs get recycled between sessions
         if os.environ.get("CORD19_SSH_KEY"):
             connect["client_keys"] = [os.environ["CORD19_SSH_KEY"]]
         cluster = SSHCluster(
             addresses,
             connect_options=connect,
-            worker_options={"nthreads": threads, "memory_limit": memory},
+            worker_options=worker_options(),
             scheduler_options={"port": 8786, "dashboard_address": ":8787"},
             # None means "the same interpreter path as the driver". The workers are
             # snapshot clones of the scheduler, so ~/pyvenv sits at the same path.
             remote_python=os.environ.get("CORD19_REMOTE_PYTHON"),
         )
-        return Client(cluster), cluster
+        client = Client(cluster)
+        client.wait_for_workers(len(addresses) - 1, timeout="180s")
+        describe(client, "SSHCluster", f"{source} -> scheduler {addresses[0]}, "
+                                      f"worker {addresses[1:]}")
+        return client, cluster
 
+    # No host list: everything runs here. Size the local cluster from THIS machine,
+    # not from a number that made sense on some other one.
+    cores = os.cpu_count() or 2
+    n_workers = int(os.environ.get("CORD19_WORKERS", max(1, min(4, cores // 2))))
+    options = worker_options()
     cluster = LocalCluster(
-        n_workers=int(os.environ.get("CORD19_WORKERS", "4")),
-        threads_per_worker=threads,
-        memory_limit=memory,
+        n_workers=n_workers,
+        threads_per_worker=options.get("nthreads", max(1, cores // n_workers)),
+        memory_limit=options["memory_limit"] / n_workers
+        if isinstance(options["memory_limit"], float)
+        else options["memory_limit"],
         processes=True,
     )
-    return Client(cluster), cluster
+    client = Client(cluster)
+    describe(client, "LocalCluster", f"nessun cluster.txt in: {', '.join(source)}")
+    return client, cluster
 
 
 def sweep(client):
