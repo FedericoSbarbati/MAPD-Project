@@ -223,6 +223,58 @@ def unmanaged_memory(client):
 # ----------------------------------------------------------------------------------
 
 
+class WorkerTracker:
+    """Counts how many workers were replaced between one measurement and the next.
+
+    A worker the nanny kills and restarts comes back on a NEW port, so an address that was
+    not there before means somebody died. Without this the campaign only learns that a
+    configuration was slow, not that it was slow *because* it spent half the run
+    recomputing what dead workers were holding - which is the whole story of `foldby` on
+    small workers (README, "Dove finisce il Reduce").
+
+    Caveat: a deliberate `scale()` down and back up would also count as new workers. The
+    worker sweep only ever scales DOWN, so in this campaign the number is clean.
+    """
+
+    def __init__(self, client):
+        self.seen = set(client.scheduler_info()["workers"])
+
+    def restarted_since(self, client):
+        current = set(client.scheduler_info()["workers"])
+        fresh = current - self.seen
+        self.seen |= current
+        return len(fresh)
+
+
+def dump_worker_logs(client, path):
+    """Save every worker's log to a file, and count the two lines that matter.
+
+    Run at the END of a block, never between measurements. `KilledWorker` says *that* the
+    workers died; only these logs say whether it was the nanny enforcing the 95% budget
+    (line "memory budget") or the kernel OOM killer (no line at all, the process just
+    disappears) - a distinction we already paid for once (PROJECT_CONTEXT.md, section 7).
+    """
+    try:
+        logs = client.get_worker_logs()
+    except Exception as error:  # a cluster that has just died cannot be interrogated
+        print("worker logs non recuperabili:", error)
+        return {}
+
+    markers = {"memory_budget": 0, "restarting": 0, "lines": 0}
+    with open(path, "w") as fh:
+        for address, lines in logs.items():
+            fh.write(f"===== {address} =====\n")
+            for level, message in lines:
+                fh.write(f"{level} {message}\n")
+                markers["lines"] += 1
+                if "memory budget" in message or "Worker is at" in message:
+                    markers["memory_budget"] += 1
+                if "Restarting worker" in message or "Nanny killing" in message:
+                    markers["restarting"] += 1
+    print("written:", path, markers)
+    return markers
+
+
 def cluster_state(client):
     """How much machine is currently working, for the record of a measurement.
 
@@ -239,8 +291,12 @@ def cluster_state(client):
     }
 
 
-def measure(fn, client, repeats=3, **columns):
+def measure(fn, client, /, repeats=3, out=None, tracker=None, **columns):
     """Time `fn()` `repeats` times and return one record per repetition.
+
+    `fn` and `client` are positional-only: every other keyword becomes a column of the CSV,
+    so a measurement that wants a column named `fn` or `client` must not be able to
+    collide with the machinery.
 
     `sweep` runs BETWEEN repetitions, never inside a timed region: it gives back the
     memory the allocator is holding, so the third measurement starts from the same place
@@ -250,18 +306,71 @@ def measure(fn, client, repeats=3, **columns):
 
     Keeping every repetition instead of only their mean is deliberate: the spread is what
     tells you whether a difference between two configurations is real.
+
+    Two things this does for an UNATTENDED overnight campaign:
+
+    - `out`: every record is appended to the CSV as soon as it exists. A run that dies at
+      3 a.m. keeps everything it had measured until then;
+    - a failing configuration is recorded (`seconds` empty, `error` filled) instead of
+      killing the campaign. Several points of this campaign are EXPECTED to die - the
+      naive combiner, `foldby` on 3.5 GB workers, 25 partitions - and "it did not complete"
+      is a result we want in the table, not a traceback in a log. The repetitions of a
+      failed point are abandoned: it would fail three times the same way, slowly.
     """
     records = []
     for repeat in range(repeats):
         sweep(client)
         started = time.perf_counter()
-        fn()
-        seconds = time.perf_counter() - started
-        records.append(
-            {**columns, "repeat": repeat, "seconds": round(seconds, 3), **cluster_state(client)}
-        )
-        print(f"  {columns} repeat={repeat} -> {seconds:6.1f} s")
+        try:
+            fn()
+            seconds = round(time.perf_counter() - started, 3)
+            error = ""
+        except Exception as exception:
+            seconds, error = None, f"{type(exception).__name__}: {exception}"[:300]
+            print(f"  {columns} repeat={repeat} -> FALLITO dopo "
+                  f"{time.perf_counter() - started:.1f} s: {error}")
+        else:
+            print(f"  {columns} repeat={repeat} -> {seconds:6.1f} s")
+
+        record = {**columns, "repeat": repeat, "seconds": seconds,
+                  **cluster_state(client), "error": error}
+        if tracker is not None:
+            record["restarted"] = tracker.restarted_since(client)
+        records.append(record)
+        if out:
+            append_record(record, out)
+        if error:
+            # Give the nannies a moment to bring back whatever died, so the NEXT
+            # configuration does not start on a half cluster and get blamed for it.
+            try:
+                client.wait_for_workers(1, timeout="120s")
+            except Exception:
+                pass
+            break
     return records
+
+
+def append_record(record, path):
+    """Append one measurement to a CSV, writing the header the first time.
+
+    One CSV per block, which is what keeps this simple: the columns of a block are fixed,
+    so the header written by its first record is right for all of them. Extra keys that
+    turn up later are dropped rather than silently shifting the columns, and they are
+    announced when it happens.
+    """
+    exists = os.path.exists(path)
+    columns = list(record)
+    if exists:
+        with open(path, newline="") as fh:
+            columns = next(csv.reader(fh), columns)
+        unexpected = [key for key in record if key not in columns]
+        if unexpected:
+            print(f"  ATTENZIONE: colonne fuori schema, non salvate in {path}: {unexpected}")
+    with open(path, "a", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=columns, extrasaction="ignore", restval="")
+        if not exists:
+            writer.writeheader()
+        writer.writerow(record)
 
 
 def scale(client, cluster, n_workers):
@@ -291,6 +400,26 @@ def save(records, path):
     print("written:", path)
 
 
+def group_seconds(records, x):
+    """{value of `x`: [seconds of the repetitions that completed]}.
+
+    Records without a time are the configurations that did not complete. They are dropped
+    HERE, at plotting time, and nowhere else: they stay in the CSV, where they say
+    something the curve cannot.
+
+    The three ways "no time" can look have to be caught together: `None` straight from
+    `measure`, `""` from a CSV read by hand, and NaN from the same CSV read by pandas -
+    and NaN is the one that slips through an `in (None, "")` test and poisons the mean.
+    """
+    by_x = {}
+    for record in records:
+        seconds = record.get("seconds")
+        if seconds is None or seconds == "" or seconds != seconds:  # NaN != NaN
+            continue
+        by_x.setdefault(record[x], []).append(float(seconds))
+    return by_x
+
+
 def plot_scaling(records, x, path, title, ylabel="seconds"):
     """Execution time against `x`, with the spread of the repetitions visible."""
     import matplotlib
@@ -298,9 +427,10 @@ def plot_scaling(records, x, path, title, ylabel="seconds"):
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    by_x = {}
-    for record in records:
-        by_x.setdefault(record[x], []).append(record["seconds"])
+    by_x = group_seconds(records, x)
+    if not by_x:
+        print("niente da plottare per", path)
+        return
     xs = sorted(by_x)
     means = [sum(by_x[value]) / len(by_x[value]) for value in xs]
     lows = [mean - min(by_x[value]) for mean, value in zip(means, xs)]
@@ -313,6 +443,54 @@ def plot_scaling(records, x, path, title, ylabel="seconds"):
     ax.set_title(title)
     ax.grid(alpha=0.25)
     ax.set_ylim(bottom=0)
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    print("written:", path)
+
+
+def plot_speedup(records, path, title, x="workers"):
+    """Speedup S(n) = T(1)/T(n) and efficiency E(n) = S(n)/n against the number of workers.
+
+    The two curves the course is really asking for behind "execution time vs number of
+    executors": the raw times say the job got faster, S and E say by how much of what was
+    added. Efficiency is the honest one - on a slice small enough it goes DOWN with more
+    workers, and that observation (one worker beating four on the sample, NOTES.md v5) is
+    worth more in the report than a curve that scales nicely.
+
+    The reference is the SMALLEST configuration measured, not necessarily 1 worker: if the
+    single-worker point did not complete, S is still defined against whatever did.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    by_x = group_seconds(records, x)
+    if not by_x:
+        print("niente da plottare per", path)
+        return
+    xs = sorted(by_x)
+    means = {value: sum(by_x[value]) / len(by_x[value]) for value in xs}
+    base_x = xs[0]
+    speedup = [means[base_x] / means[value] for value in xs]
+    efficiency = [s / (value / base_x) for s, value in zip(speedup, xs)]
+
+    fig, (top, bottom) = plt.subplots(2, 1, figsize=(7, 7), sharex=True)
+    top.plot(xs, speedup, marker="o", color="#2f6f73", label="misurato")
+    top.plot(xs, [value / base_x for value in xs], "--", color="#999", label="ideale")
+    top.set_ylabel(f"speedup vs {base_x} {x}")
+    top.set_title(title)
+    top.legend()
+    top.grid(alpha=0.25)
+
+    bottom.plot(xs, efficiency, marker="o", color="#b4674d")
+    bottom.axhline(1.0, ls="--", color="#999")
+    bottom.set_ylabel("efficienza")
+    bottom.set_xlabel(x)
+    bottom.set_ylim(bottom=0)
+    bottom.grid(alpha=0.25)
+
     fig.tight_layout()
     fig.savefig(path, dpi=150)
     plt.close(fig)

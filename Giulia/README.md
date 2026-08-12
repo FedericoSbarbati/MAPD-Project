@@ -7,6 +7,7 @@ raccomandata dal testo: «we recommend utilizing the RDD/Bag data structure»).
 |---|---|
 | `word_count.py` | l'implementazione: funzioni pure + un `main()` per lanciarla da terminale |
 | `word_count.ipynb` | il notebook, che **importa** il modulo — nessun codice duplicato, nessun sottoprocesso |
+| `bench_word_count.py` | la campagna di benchmark, un blocco per invocazione — vedi sotto |
 
 Dipendenze condivise col resto del progetto: `bench.py` alla root (creazione del Client
 e strumenti di misura). Nessun ambiente Python separato: si usa quello del progetto
@@ -82,9 +83,72 @@ python Giulia/word_count.py data/silver/paragraphs --check     # + verifica dell
 Output: `top_words.csv`, `top_words.png` (il barplot che l'assignment chiede) e
 `word_counts/` in Parquet col vocabolario completo.
 
-Variabili d'ambiente del cluster (le stesse della pipeline di conversione):
-`CORD19_WORKERS`, `CORD19_THREADS_PER_WORKER`, `CORD19_WORKER_MEMORY_LIMIT`,
-`CORD19_SSH_KEY`, `DASK_SCHEDULER`.
+| `--split-out N` | in quante parti spezzare il reduce finale (default 16); `0` = `Bag.foldby`, più lento — vedi sotto |
+
+### Su Cloud Veneto
+
+`cluster.txt` va nella **root del repo** (viene cercato anche in `~` e nella cartella
+corrente). Il **primo IP fa solo da scheduler**: con 4 worker servono 5 voci.
+
+```bash
+printf 'IP_SCHEDULER,IP_W1,IP_W2,IP_W3,IP_W4\n' > ~/MAPD-Project/cluster.txt
+source ~/pyvenv/bin/activate
+cd ~/MAPD-Project
+python Giulia/word_count.py ~/mapd-data/silver/paragraphs --split-out 16
+```
+
+All'avvio lo script stampa su cosa sta girando davvero. **Controlla questa riga:**
+
+```
+workers   : 4 su 4 host ['10.67.22.51', ...]
+```
+
+Se leggi `su 1 host ['127.0.0.1']` non sei sul cluster: sta girando tutto sulla VM
+scheduler, e `cluster.txt` non è stato trovato (lo script elenca dove ha cercato).
+
+Le dimensioni dei worker non vanno scritte da nessuna parte: `memory_limit` è una
+**frazione** della RAM del nodo (85%) e `nthreads` non è impostato, così ogni nodo usa i
+propri core. Il cluster si ricostruisce da snapshot a ogni sessione e il flavour delle VM
+cambia — le costanti assolute sono bug che aspettano. Per forzarle:
+`CORD19_WORKER_MEMORY_FRACTION`, `CORD19_WORKER_MEMORY_LIMIT`,
+`CORD19_THREADS_PER_WORKER`, `CORD19_WORKERS`, `CORD19_SSH_KEY`, `DASK_SCHEDULER`.
+
+### Dove finisce il Reduce: il risultato più istruttivo del task
+
+`Bag.foldby` e `Bag.frequencies` riducono **sempre a una partizione sola**: tutto lo
+spazio delle chiavi deve stare in un singolo task, su un singolo worker. Con la parola
+come chiave è fattibile — il vocabolario satura al crescere del corpus — ma resta **una
+coda seriale**, e verso la fine i task intermedi accumulano dizionari che tendono al
+vocabolario intero (6,04 M parole, ~1,5–2 GB).
+
+Misurato sul corpus intero, stessa macchina, stesso codice, risultato identico:
+
+| configurazione | tempo | worker uccisi (95% budget) |
+|---|---:|---:|
+| 7,0 GB/worker, `foldby` | 1.128 s | 0 |
+| 3,4 GB/worker, `foldby` | 1.762 s | 3 |
+| **3,4 GB/worker, `--split-out 16`** | **274 s** | **0** |
+
+Due letture, entrambe utili:
+
+- **memoria**: con 3,4 GB il `foldby` uccide 3 worker; il run finisce lo stesso perché
+  Dask ricalcola, ma paga il 56% e i kill arrivano *a metà run*. Sul cluster vero, con la
+  rete di mezzo, quei ricalcoli diventano una spirale;
+- **tempo**: `--split-out` è **4 volte più veloce del miglior run con `foldby`**, su
+  worker grandi la metà. Non è (solo) memoria: è che la coda seriale di `foldby` — un
+  task che macina un dizionario Python da 6 M voci — diventa 16 task paralleli con
+  aggregazione vettoriale.
+
+Da qui il default. `--split-out 0` seleziona il `foldby` puro, ed è il modo di riprodurre
+il confronto. La fase Map, dove sta il lavoro vero, resta Bag; il testo dell'assignment
+permette esplicitamente di passare da Bag a DataFrame.
+
+Verificato che le due strade danno lo stesso identico risultato sul corpus intero:
+6.037.808 parole, 785.753.529 occorrenze, ogni conteggio uguale.
+
+*Dettaglio che costa un run se non lo si sa*: lo shuffle P2P non riesce a ricostruire la
+propria spec sullo scheduler quando il grafo nasce da un Bag e muore con
+`P2P <id> failed during transfer phase`. Il codice forza lo shuffle task-based.
 
 ## Le decisioni, e il numero che le giustifica
 
@@ -161,24 +225,66 @@ che `doc_counts` non è esattamente "una riga per (documento, parola)".
 ## Benchmark
 
 Obbligatori per il corso: tempo di esecuzione contro **numero di partizioni** e contro
-**numero di worker**. Stanno nel notebook (§9), con l'impalcatura in `bench.py`.
+**numero di worker**. Girano con `bench_word_count.py`, **un blocco per invocazione**;
+il notebook (§9) ne legge i CSV e fa i grafici. Impalcatura condivisa in `bench.py`.
 
-Tre dettagli che cambiano il significato della misura:
+```bash
+tmux new -s bench          # la campagna dura ore: non deve morire con la sessione SSH
+source ~/pyvenv/bin/activate && cd ~/MAPD-Project
+for b in A1 A2 A3a A3b A4 A5 A6 D1 D2; do
+  python Giulia/bench_word_count.py $b --input ~/mapd-data/silver/paragraphs
+done
+```
 
-- nel sweep sulle partizioni **i dati restano gli stessi** e cambia solo come sono
-  suddivisi. Il vecchio benchmark misurava fette di corpus crescenti (3/10/25/50
-  partizioni), cioè tempo vs *quantità di dati*: un'altra domanda;
-- si usa `repartition(npartitions=k)`, **non** `repartition(partition_size=…)`: la
-  seconda si impianta sotto un Client distribuito (`PROJECT_CONTEXT.md`, §8.4);
-- su `SSHCluster` il pool di worker è la lista di host, quindi il sweep può solo
-  **scendere**: si elencano tutti i worker in `cluster.txt` e si scala verso il basso.
+| blocco | cosa misura |
+|---|---|
+| `A1` | dove va il tempo: sola lettura / fase Map / job completo |
+| **`A2`** | **tempo vs numero di partizioni** (obbligatorio) |
+| `A3a` | tempo vs strategia di Reduce (`foldby`, `split_out` 1/4/16/64/256), payload `topk` |
+| `A3b` | le stesse strategie **scrivendo il vocabolario** — il payload che ha ucciso il cluster |
+| `A4` | granularità del combiner (L0/L1/L2) su fette crescenti |
+| `A5` | tempo vs volume di dati, a taglia di partizione costante |
+| **`A6`** | **tempo vs numero di worker** (obbligatorio) |
+| `B` | il payload standard sulla forma di cluster data dall'ambiente (processi vs thread) |
+| `D1`/`D2` | run di riferimento sul corpus intero, con e senza sharding del Reduce |
+
+Un blocco per invocazione perché un blocco che muore si porta via solo se stesso e si
+rilancia da solo; ogni misura è **appesa al CSV appena esiste**, quindi una campagna
+interrotta alle 3 di notte conserva quello che aveva.
+
+### I dettagli che cambiano il significato della misura
+
+- nello sweep sulle partizioni **i dati restano gli stessi** e cambia solo come sono
+  suddivisi. Misurare fette di corpus crescenti è un'altra domanda, ed è `A5`;
+- il numero di partizioni si controlla **raggruppando i file in lettura**
+  (`read_groups` + `split_evenly`), non con un `repartition` a valle. `dd.read_parquet`
+  qui dà sempre una partizione per file — ogni Parquet del silver ha **un solo
+  row-group**, e `blocksize` fra 4 e 64 MB non cambia niente (misurato) — quindi
+  ripartizionare dopo significherebbe cronometrare anche il rimescolamento. E
+  `repartition(partition_size=…)` si impianta sotto un Client distribuito
+  (`PROJECT_CONTEXT.md`, §8.4);
+- **`A6` va per ultimo**: su `SSHCluster` il pool di worker è la lista di host e
+  `scale()` non può risalire. Nella versione precedente non era così, e lo sweep sulle
+  strategie di Reduce finiva misurato su **un worker solo** — proprio il confronto in cui
+  il parallelismo della coda è l'oggetto della misura;
+- `B` ha bisogno di un cluster di forma diversa, quindi è un processo a parte con il
+  proprio ambiente. Attenzione a `CORD19_WORKER_MEMORY_FRACTION`: `worker_options`
+  dimensiona ogni worker come frazione della RAM del **nodo** e non la divide per il
+  numero di worker su quel nodo, quindi due worker per host al default 0,85 crederebbero
+  di possedere 3,5 GB di una macchina da 4 GB.
 
 `bench.measure` ripete ogni misura, chiama `sweep()` **tra** una ripetizione e l'altra
 (mai dentro una regione cronometrata) e non usa `client.restart()`, che sporcherebbe i
 tempi. Conserva tutte le ripetizioni, non solo la media: è la dispersione a dire se una
-differenza è reale. Registra anche l'unmanaged del worker peggiore — se cresce
-linearmente con le ripetizioni c'è un hotspot di churn nel task
-(`docs/MEMORY_LEAK_REPORT.md`, §7.4).
+differenza è reale. Registra worker, thread e unmanaged del worker peggiore **effettivi**
+al momento della misura — se l'unmanaged cresce linearmente c'è un hotspot di churn nel
+task (`docs/MEMORY_LEAK_REPORT.md`, §7.4) — e conta i worker ripartiti, che è il modo di
+far diventare «3 worker uccisi» un numero invece di un aneddoto.
+
+**Una configurazione che non completa viene registrata**, con `seconds` vuoto e l'errore,
+e la campagna prosegue. Non è tolleranza ai guasti fine a se stessa: alcuni punti *devono*
+fallire — il combiner L0, il `foldby` su worker da 3,5 GB, poche partizioni molto grosse —
+e «non ha completato» è una riga della tabella, non un buco.
 
 Il benchmark va fatto **sul corpus vero**: su una fetta piccola i tempi sono dominati
 dall'overhead di scheduling e più worker risultano più lenti di uno solo.

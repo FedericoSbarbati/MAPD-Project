@@ -25,6 +25,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 import dask
+import dask.bag as db
 import dask.dataframe as dd
 
 # The shared cluster/benchmark helpers live at the repository root.
@@ -35,6 +36,11 @@ from bench import get_client  # noqa: E402
 DEFAULT_INPUT = "data_sample/silver/paragraphs" # Default input path for the paragraphs dataset
 DEFAULT_OUTPUT = "reports/word_count" # git-ignored, and on the VM it sits on the data volume
 TOP_N = 20 # Number of top words to display in order of occurence
+
+# How many parts the final Reduce is split into. 0 = the plain `Bag.foldby`, which ends
+# in ONE task holding the whole vocabulary: a memory ceiling and a serial tail. See
+# `word_count` for the measurements that made this the default rather than the fallback.
+SPLIT_OUT = 16
 
 # Characters the corpus uses instead of the plain ASCII ones. U+2013 EN DASH is the
 # single most frequent non-ASCII character in the whole corpus (286,687 hits in 1.1M
@@ -138,6 +144,54 @@ def document_counts(partition):
     ]
 
 
+# The document id `partition_counts` puts in the key it no longer has. Nothing reads it -
+# `word_of` and `word_and_count` both throw the first element away - but keeping the shape
+# `((doc, word), count)` identical across the three combiners means the Reduce phase, and
+# every benchmark that drives it, is literally the same code for all of them.
+NO_DOCUMENT = None
+
+
+def occurrence_counts(partition):
+    """Map phase WITHOUT the combiner: one entry per OCCURRENCE. Benchmark only.
+
+    This is the formulation you write first and the one that cannot work: it sends one
+    record per word occurrence into the shuffle (785 M of them on the full corpus) instead
+    of one per (document, word). It is here to be measured, not to be used - see
+    `bench_word_count.py`, block A4, where it is run against growing slices to find the
+    point at which it stops completing.
+    """
+    return [
+        ((cord_uid, word), 1)
+        for cord_uid, text in partition
+        for word in words(text)
+    ]
+
+
+def partition_counts(partition):
+    """Map phase with the combiner pushed one level FURTHER: one entry per (partition, word).
+
+    `document_counts` counts per document because §2.3.1 asks for the pairs (w, cp(w)) of
+    each document D. That granularity has a price: a word appearing in 500 documents of the
+    same partition leaves the worker 500 times instead of once. This variant collapses the
+    documents inside the partition, which is the least the Reduce phase could possibly be
+    given, and therefore the lower bound the assignment's own formulation is measured
+    against. It computes the same c(w) and it does NOT produce the assignment's Map output.
+    """
+    counts = Counter()
+    for _, text in partition:
+        counts.update(words(text))
+    return [((NO_DOCUMENT, word), count) for word, count in counts.items()]
+
+
+# The three rungs of the combiner ladder, from no combiner to the most aggressive one.
+# "document" is the assignment's own formulation and stays the default everywhere.
+COMBINERS = {
+    "none": occurrence_counts,
+    "document": document_counts,
+    "partition": partition_counts,
+}
+
+
 def read_paragraphs(path, drop_reference_like=True, npartitions=None):
     """silver/paragraphs -> a Bag of (cord_uid, text) tuples.
 
@@ -161,6 +215,81 @@ def read_paragraphs(path, drop_reference_like=True, npartitions=None):
     return paragraphs[["cord_uid", "text"]].to_bag(format="tuple")
 
 
+# ----------------------------------------------------------------------------------
+# The benchmark reader. `read_paragraphs` above stays the production path; this one
+# exists because the mandatory "time vs number of partitions" sweep cannot be measured
+# honestly through it.
+# ----------------------------------------------------------------------------------
+
+
+def paragraph_files(path):
+    """The Parquet files of a silver/paragraphs directory, in `part.<n>` NUMERIC order.
+
+    Numeric and not lexicographic on purpose: sorted as strings, `part.10` lands between
+    `part.1` and `part.2`. The order has to be stable *and* meaningful, because the
+    benchmarks measure a fixed slice `files[:N]` and that slice was verified representative
+    of the whole corpus in exactly this order: on the first 400 files, 75.7% of the
+    paragraphs come from `pmc` against 73.5% over the whole corpus, and 838 bytes of text
+    per row against 778. The source matters - the LaTeX preamble only exists in `pmc`.
+    """
+    def part_number(file):
+        pieces = file.stem.split(".")  # "part.137" -> ["part", "137"]
+        return int(pieces[-1]) if pieces[-1].isdigit() else -1
+
+    return sorted(Path(path).glob("*.parquet"), key=lambda f: (part_number(f), f.name))
+
+
+def split_evenly(files, k):
+    """Split a file list into `k` groups of (almost) equal length.
+
+    `k` is clamped to the number of files: one file is the finest grain this reader can
+    produce, because a silver/paragraphs Parquet holds a single row group and a row group
+    cannot be split. To go finer, `Bag.repartition` on the result - and say so in the
+    record, since that is a different mechanism.
+    """
+    k = max(1, min(int(k), len(files)))
+    return [files[i * len(files) // k: (i + 1) * len(files) // k] for i in range(k)]
+
+
+def load_group(partition, drop_reference_like):
+    """One Bag partition, holding one group of file paths -> its (cord_uid, text) pairs."""
+    import pyarrow.compute as pc
+    import pyarrow.parquet as pq
+
+    pairs = []
+    for group in partition:  # partition_size=1 below: exactly one group per partition
+        table = pq.read_table(list(group), columns=["cord_uid", "text", "is_reference_like"])
+        if drop_reference_like:
+            # Same rule as the DataFrame path. Measured on the corpus: no nulls in this
+            # column, so `== False` and `~` select exactly the same rows.
+            table = table.filter(pc.equal(table["is_reference_like"], False))
+        pairs.extend(zip(table["cord_uid"].to_pylist(), table["text"].to_pylist()))
+    return pairs
+
+
+def read_groups(groups, drop_reference_like=True):
+    """Groups of Parquet files -> a Bag of (cord_uid, text), ONE GROUP PER PARTITION.
+
+    Why this exists rather than `read_paragraphs(...).repartition(k)`:
+
+    - `dd.read_parquet` always yields one partition per file here, and no `blocksize`
+      changes that - measured, 4 MB to 64 MB all give the same 1979 partitions, because
+      each silver file contains a single row group. So the read cannot be used to vary the
+      partitioning;
+    - repartitioning afterwards means the file reading always happens at the native
+      granularity and a reshuffle whose cost depends on k is then billed to the stopwatch.
+      The sweep would be measuring the repartition, not the partitioning.
+
+    Grouping the FILES instead gives exactly k partitions, no shuffle at all, and a read
+    cost that scales with partition size the way it should. The work items travelling in
+    the graph are file names only (PROJECT_CONTEXT.md, rule 8.7).
+    """
+    groups = [[str(file) for file in group] for group in groups]
+    return db.from_sequence(groups, partition_size=1).map_partitions(
+        load_group, drop_reference_like
+    )
+
+
 def word_of(doc_count):
     """((cord_uid, word), cp) -> word. The grouping key of the Reduce phase."""
     (_, word), _ = doc_count
@@ -180,20 +309,30 @@ def word_and_count(doc_count):
     return word, count
 
 
-def word_count(paragraphs, split_out=0):
+def word_count(paragraphs, split_out=SPLIT_OUT, combiner="document"):
     """Bag of (cord_uid, text) -> the two Bags of the assignment, still lazy.
 
     Returns (doc_counts, global_counts):
         doc_counts     ((cord_uid, word), cp)   the Map phase output
         global_counts  (word, c)                the Reduce phase output
 
+    `combiner` selects the granularity of the Map phase and only ever moves for a
+    benchmark: "document" is what §2.3.1 asks for and the default. See `COMBINERS`.
+
     `split_out` chooses how the Reduce is executed. Both paths compute exactly the same
-    thing; they differ in how much memory the last task needs. See the comments below and
-    the README section on the reduction key.
+    thing - verified on the full corpus, 6,037,808 words and 785,753,529 occurrences, every
+    count equal - but `split_out=0` (a plain `Bag.foldby`) ends in a single task, which is
+    both a memory ceiling and a serial tail. Measured on the whole corpus:
+
+        7.0 GB/worker, foldby            1128 s, 0 workers killed
+        3.4 GB/worker, foldby            1762 s, 3 workers killed
+        3.4 GB/worker, split_out=16       274 s, 0 workers killed
+
+    Keep `split_out=0` when you want to reproduce that comparison; otherwise leave it.
     """
     # Map phase. Purely local: no data crosses the network here, and the number of
     # partitions is unchanged.
-    doc_counts = paragraphs.map_partitions(document_counts)
+    doc_counts = paragraphs.map_partitions(COMBINERS[combiner])
 
     if split_out:
         # Sharded Reduce, for when the vocabulary does not fit in one worker.
@@ -255,9 +394,10 @@ def parse_args():
     parser.add_argument("--out", default=DEFAULT_OUTPUT, help=f"output directory (default {DEFAULT_OUTPUT})")
     parser.add_argument("--top", type=int, default=TOP_N, help="how many words to export and plot")
     parser.add_argument("--partitions", type=int, help="use only the first N partitions (smoke test)")
-    parser.add_argument("--split-out", type=int, default=0,
-                        help="shard the final reduce into N parts, for workers too small "
-                             "to hold the whole vocabulary in one task (0 = plain Bag foldby)")
+    parser.add_argument("--split-out", type=int, default=SPLIT_OUT,
+                        help=f"shard the final reduce into N parts (default {SPLIT_OUT}); "
+                             "0 selects the plain Bag foldby, which is slower and needs a "
+                             "big worker - useful to reproduce the comparison")
     parser.add_argument("--keep-references", action="store_true", help="do not drop reference-like paragraphs")
     parser.add_argument("--check", action="store_true", help="also verify the Map/Reduce invariant (doubles the runtime)")
     return parser.parse_args()
