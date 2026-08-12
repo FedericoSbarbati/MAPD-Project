@@ -272,17 +272,22 @@ def read_groups(groups, drop_reference_like=True):
 
     Why this exists rather than `read_paragraphs(...).repartition(k)`:
 
-    - `dd.read_parquet` always yields one partition per file here, and no `blocksize`
-      changes that - measured, 4 MB to 64 MB all give the same 1979 partitions, because
-      each silver file contains a single row group. So the read cannot be used to vary the
-      partitioning;
-    - repartitioning afterwards means the file reading always happens at the native
-      granularity and a reshuffle whose cost depends on k is then billed to the stopwatch.
-      The sweep would be measuring the repartition, not the partitioning.
+    - through `dd.read_parquet` the partition count is not a knob you set, it is a
+      property you discover. `blocksize` does not move it (measured, 4 MB to 64 MB, with
+      and without a distributed Client: always 1979, because each silver file holds a
+      single row group and nothing aggregates across files) - and then `to_bag` forces
+      `optimize()`, and dask-expr COALESCES the small partitions. Measured on the corpus:
+      `dd.read_parquet(...).npartitions` says 1979, and what actually runs is **990**.
+      That is the 990 the VM printed for 1979 files, and the number nobody asked for;
+    - repartitioning afterwards means the file reading always happens at that granularity
+      anyway, and a reshuffle whose cost depends on k is then billed to the stopwatch. The
+      sweep would be measuring the repartition, not the partitioning.
 
-    Grouping the FILES instead gives exactly k partitions, no shuffle at all, and a read
-    cost that scales with partition size the way it should. The work items travelling in
-    the graph are file names only (PROJECT_CONTEXT.md, rule 8.7).
+    Grouping the FILES instead gives exactly k, no shuffle at all, and a read cost that
+    scales with partition size the way it should. Verified end to end: for k requested,
+    the executed graph really contains k Map tasks - a Bag is not a dask-expr collection,
+    so no optimizer coalesces it behind us. The work items travelling in the graph are
+    file names only (PROJECT_CONTEXT.md, rule 8.7).
     """
     groups = [[str(file) for file in group] for group in groups]
     return db.from_sequence(groups, partition_size=1).map_partitions(

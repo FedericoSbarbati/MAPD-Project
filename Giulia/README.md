@@ -257,12 +257,9 @@ interrotta alle 3 di notte conserva quello che aveva.
 - nello sweep sulle partizioni **i dati restano gli stessi** e cambia solo come sono
   suddivisi. Misurare fette di corpus crescenti è un'altra domanda, ed è `A5`;
 - il numero di partizioni si controlla **raggruppando i file in lettura**
-  (`read_groups` + `split_evenly`), non con un `repartition` a valle. `dd.read_parquet`
-  qui dà sempre una partizione per file — ogni Parquet del silver ha **un solo
-  row-group**, e `blocksize` fra 4 e 64 MB non cambia niente (misurato) — quindi
-  ripartizionare dopo significherebbe cronometrare anche il rimescolamento. E
-  `repartition(partition_size=…)` si impianta sotto un Client distribuito
-  (`PROJECT_CONTEXT.md`, §8.4);
+  (`read_groups` + `split_evenly`), non con un `repartition` a valle — vedi sotto, «le
+  partizioni che non hai chiesto». E `repartition(partition_size=…)` si impianta sotto un
+  Client distribuito (`PROJECT_CONTEXT.md`, §8.4);
 - **`A6` va per ultimo**: su `SSHCluster` il pool di worker è la lista di host e
   `scale()` non può risalire. Nella versione precedente non era così, e lo sweep sulle
   strategie di Reduce finiva misurato su **un worker solo** — proprio il confronto in cui
@@ -288,6 +285,34 @@ e «non ha completato» è una riga della tabella, non un buco.
 
 Il benchmark va fatto **sul corpus vero**: su una fetta piccola i tempi sono dominati
 dall'overhead di scheduling e più worker risultano più lenti di uno solo.
+
+### Le partizioni che non hai chiesto
+
+Lo script stampa `partitions: 990` su una cartella di **1979 file**, e per un po' abbiamo
+creduto a una copia parziale dei dati. Non lo è: sono 1979 file e 12.445.234 righe, sia in
+locale sia sulla VM. Il 990 è dask.
+
+| passo | partizioni |
+|---|---:|
+| `dd.read_parquet(...)` | 1.979 |
+| `+ filtro is_reference_like` | 1.979 |
+| `+ proiezione a 2 colonne` | 1.979 |
+| **`+ to_bag()`** | **990** |
+
+`to_bag` forza `optimize()`, e l'ottimizzatore di dask-expr **fonde le partizioni piccole**
+(mediana 2,6 MB) a due a due. `blocksize` non c'entra: da 4 a 64 MB, con e senza Client
+distribuito, restano sempre 1979 — ogni Parquet del silver ha un solo row-group e niente
+aggrega fra file.
+
+Due conseguenze che valgono per tutti e quattro i task:
+
+- **`.npartitions` prima di un `compute` non dice quante partizioni gireranno.** Il numero
+  vero è quello dell'espressione *ottimizzata*;
+- attraverso `dd.read_parquet` il numero di partizioni **non è una manopola**, è una
+  proprietà che si scopre. Per un benchmark che ha il partizionamento come variabile
+  indipendente è squalificante — da qui `read_groups`, che dà esattamente `k` (verificato:
+  `k` chiesto ⇒ `k` task di Map nel grafo eseguito, perché un Bag non è una collezione
+  dask-expr e nessun ottimizzatore lo tocca alle spalle).
 
 ## Limiti noti
 
