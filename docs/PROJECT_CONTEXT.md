@@ -1,37 +1,52 @@
 # MAPD-B · CORD-19 — Contesto di progetto, schemi dati e diario dei problemi
 
 > **A cosa serve questo documento.** Il codice si scrive sul Mac ma gira "per davvero"
-> sulla VM di Cloud Veneto ([userguide](https://userguide.cloudveneto.it/en/latest/)):
-> due ambienti con dati, risorse e vincoli **diversi**. Chi scrive codice (persona o
-> agente) deve leggere questo file per capire il contesto reale della VM prima di
-> toccare la pipeline. Documenti gemelli: `docs/SETUP_CLOUDVENETO.md` (accesso SSH
-> sicuro al cluster), `DATA_DICTIONARY.md` (dizionario colonna-per-colonna dei Parquet).
+> sul cluster di Cloud Veneto ([userguide](https://userguide.cloudveneto.it/en/latest/index.html),
+> fonte autorevole): due ambienti con dati, risorse e vincoli **diversi**. Qui sta il
+> **perché** delle scelte; i passi operativi stanno in `docs/SETUP_CLOUDVENETO.md`, le
+> decisioni già prese in `docs/DECISIONI.md`, le colonne dei Parquet in
+> `DATA_DICTIONARY.md`.
 
-**Stato al 2026-07-11:** la fase di generazione dati è **COMPLETATA** — il run completo
-sul corpus da ~100 GB è andato a buon fine sulla VM e l'output (`data/`, ~9 GB) è stato
-scaricato in locale. Prossima fase: i 4 task di analisi + benchmark obbligatori.
+**Stato al 2026-08-13.** I dati sono **fatti e definitivi**: la conversione del corpus da
+~100 GB è andata a buon fine e il `silver/` è oggi **replicato su ogni macchina** del
+cluster (e scaricato in locale in `data/`). Il **task 1 — word count — è finito e
+validato** sul corpus intero. Restano i task 2, 3, 4 e i **benchmark obbligatori**, la cui
+impalcatura va rifatta da zero (§9).
+
+> ⚠️ **L'architettura del cluster è cambiata ad agosto 2026.** Il volume condiviso via
+> NFS non si usa più: adesso **ogni persona ha il suo cluster** e i dati sono replicati
+> sul disco di ogni macchina. Se trovi da qualche parte istruzioni su come montare
+> `/data` o lanciare `scripts/cluster_storage_up.sh`, è materiale della fase precedente.
 
 ---
 
 ## 1 · I due ambienti (leggere PRIMA di scrivere codice)
 
-| | **Mac (sviluppo)** | **VM Cloud Veneto (esecuzione reale)** |
+| | **Mac (sviluppo)** | **Cluster Cloud Veneto (esecuzione reale)** |
 |---|---|---|
-| Ruolo | scrivere codice, dry-run su campione | run completi sul corpus vero |
-| Dump raw CORD-19 | `archive/` ~28 GB — **versione VECCHIA** del dataset (metadata: 425.796 righe → 406.211 `cord_uid`) | volume `/data` — dump **completo** Kaggle v111 (~100 GB estratti, 18,4 GB compressi; metadata: 1.056.660 righe → 970.836 `cord_uid`) |
+| Ruolo | scrivere codice, provare su un campione | run completi sul corpus vero, benchmark |
+| Dati usati dai task | `data/silver/` — copia scaricata dal run di conversione | `~/mapd-data/silver/` — **una copia su OGNI macchina**, dallo snapshot |
 | Ambiente Python | conda `mapd-covid` (py 3.11, dask 2026.6.0) | venv `~/pyvenv` (dask 2026.6.0 + asyncssh), Ubuntu 22.04 |
-| Cluster | `LocalCluster` (default 4 worker) | `SSHCluster` multi-nodo: node0 scheduler+NFS + worker da 8 GB |
-| Output pipeline | `data_sample/` (dry-run con `CORD19_SAMPLE=N`) | `data/` sul volume persistente |
-| `data/` locale | ⚠️ **copia SCARICATA dell'output VM** (run completo) — NON rigenerabile in locale | l'originale, su `/data` |
-| Dashboard Dask | `localhost:8787` | `node0:8787` (tunnel via gate) |
+| Cluster | `LocalCluster`, dimensionato sui core del Mac | `SSHCluster`: 3–5 macchine uguali, la prima solo scheduler |
+| Output | `reports/` (in migrazione verso `~/mapd-out/`) | `~/mapd-out/` — **fuori dalla repo**, che è usa-e-getta |
+| Come si lancia | file `.py` da terminale | file `.py` da terminale, via SSH dal gate |
+| Dashboard Dask | `localhost:8787` | `<ip scheduler>:8787` (tunnel via gate) |
 
-**Workflow:** codice sul Mac → push su GitHub → pull sulla VM (repo sul volume) →
-esecuzione headless su copia usa-e-getta → output su `/data` → (una tantum) download
-di `data/` sul Mac.
+**Workflow:** codice sul Mac → push su GitHub → sul cluster si clona la repo → si scrive
+`cluster.txt` → si lancia il `.py` → i risultati in `~/mapd-out/` → si scaricano sul Mac.
+I passi esatti sono in `docs/SETUP_CLOUDVENETO.md` §2.
 
-**Conseguenza da non dimenticare:** i numeri di un run locale e di un run VM **non
-coincidono mai** (dump diversi). Non hard-codare conteggi assoluti negli assert (il
-numero magico `406211` è già stato rimosso una volta); le garanzie vere sono
+**Niente notebook in esecuzione.** Si lavora da terminale: i file `.py` sono ciò che gira,
+i notebook servono a **spiegare** il codice, non a eseguirlo. Non c'è VS Code remoto e non
+si apre Jupyter sulle VM.
+
+**Il dump grezzo non serve più.** `archive/` sul Mac (~28 GB, versione vecchia) e i ~100 GB
+sul volume di rete servivano alla conversione JSON→Parquet, che è finita e **non fa parte
+dell'assignment**. Restano come archivio. I task leggono solo il `silver/`.
+
+**Conseguenza da non dimenticare:** i numeri di un run sul dump locale vecchio e quelli
+del corpus completo **non coincidono mai**. Non hard-codare conteggi assoluti negli assert
+(il numero magico `406211` è già stato rimosso una volta); le garanzie vere sono
 strutturali (unicità di `cord_uid`, integrità referenziale, invariante prefer-pmc).
 
 ---
@@ -49,11 +64,24 @@ strutturali (unicità di `cord_uid`, integrità referenziale, invariante prefer-
 4. **Consolidamento in un unico notebook** `conversion_sanification.ipynb` guidato da
    env var (stesso file gira invariato su Mac e VM) e **riscrittura fully-Dask**
    (zero pandas lato driver: il corpus VM non ci starebbe).
-5. **Setup Cloud Veneto:** VM scheduler, snapshot per clonare i worker, `SSHCluster`,
-   volume dati da 200 GB, NFS, modello di accesso a chiavi per il gruppo (§5 e
-   `docs/SETUP_CLOUDVENETO.md`).
-6. **Run sul corpus completo** → serie di OOM sui worker → tre round di
+5. **Setup Cloud Veneto, prima versione:** VM scheduler, snapshot per clonare i worker,
+   `SSHCluster`, volume dati da 200 GB condiviso via NFS.
+6. **Run di conversione sul corpus completo** → serie di OOM sui worker → tre round di
    diagnosi & fix (il "memory leak", §7) → run completato, output scaricato.
+7. **Task 1 (word count) rifatto da zero** (cartella `Giulia/`, diario in
+   `local/NOTES.md`): il codice precedente non era spiegabile all'orale e il suo
+   "benchmark" misurava la cosa sbagliata. Sei versioni, ognuna motivata da una misura;
+   la scoperta centrale è che in Dask Bag ogni riduzione tipo-groupby collassa in **una
+   sola partizione**, quindi la scelta della chiave di riduzione decide se il lavoro è
+   fattibile. Run completo passato: 12.445.234 paragrafi, 785.753.529 occorrenze.
+8. **Prima sessione sul cluster vero, fallita** — e per nessun motivo algoritmico:
+   `cluster.txt` nel posto sbagliato (fallback silenzioso su una macchina sola), limiti
+   di memoria assoluti ereditati da VM di taglia diversa, path relativi alla cartella da
+   cui si lanciava. Da lì: configurazione sempre stampata, dimensionamento relativo, path
+   risolti sulla radice della repo.
+9. **Cambio di architettura (agosto 2026):** via l'NFS, un cluster per persona, dati
+   replicati su ogni macchina (§5). E presa d'atto che l'impalcatura dei benchmark
+   (`bench.py`) è cresciuta oltre lo scopo del corso: va rifatta (§9).
 
 ---
 
@@ -130,8 +158,8 @@ Colonne chiave di `silver/paragraphs` (schema Arrow esplicito, pinnato in scritt
 | `silver/paper_countries` | 102.431 | **284.042** | 64 |
 | `silver/paper_institutions` | 184.818 | **517.911** | 48 |
 
-⚠️ `DATA_DICTIONARY.md` riporta ancora i conteggi del run locale: lo **schema** è
-identico, i **numeri** no. `silver/paragraphs` ha 1.979 file perché è scritto a
+`DATA_DICTIONARY.md` riporta i conteggi del corpus completo, **rimisurati sui dati veri il
+2026-08-13** (colonna per colonna). `silver/paragraphs` ha 1.979 file perché è scritto a
 blocchi da partizioni-per-row-group (vedi §7): tante partizioni piccole e uniformi
 sono volute, non un incidente.
 
@@ -144,70 +172,109 @@ sono volute, non un incidente.
 
 ---
 
-## 5 · Cluster Cloud Veneto e gestione del volume dati
+## 5 · Il cluster: perché è fatto così
 
-### Topologia (decisa dopo gli OOM: pochi worker grossi, non tanti piccoli)
+I passi per accenderlo sono in `docs/SETUP_CLOUDVENETO.md`. Qui c'è solo il ragionamento
+dietro ogni scelta — serve per difenderle all'orale e per non "migliorarle" per sbaglio.
 
 ```
-                    gate.cloudveneto.it  (ProxyJump, accesso umano)
+                    gate.cloudveneto.it  (accesso umano, ProxyJump)
                             │
-   node0 = scheduler + NFS server (NON worker)      rete interna 10.67.22.x
-   │  • volume Ceph "mapd-data" 200 GB → mount /data
-   │  • esporta /data via NFS alla subnet
-   │  • la sua RAM fa da page-cache NFS per tutti
-   ├── worker-1  (8 GB RAM, clone dello snapshot, monta /data via NFS)
-   ├── worker-2  (idem)
-   └── worker-N  (run finale: 4 worker × 8 GB; memory_limit 7 GB, 4 thread)
+   macchina 1 = SOLO scheduler + il terminale da cui lanci      rete 10.67.22.x
+   │   (copia locale dei dati in ~/mapd-data/silver)
+   ├── worker-1   copia locale dei dati
+   ├── worker-2   copia locale dei dati
+   └── worker-N   3 macchine minimo, 4–5 di solito, tutte della STESSA taglia
+                  (medium 4 GB RAM / large 8 GB, ~25 GB di disco)
 ```
 
-Scelte chiave e perché:
+**Un cluster per persona, non uno condiviso.** È la scelta che ha causato tutte le altre,
+ed è organizzativa, non tecnica: un volume OpenStack si attacca a **una sola macchina per
+volta**, quindi condividere i dati via NFS obbligava tutti e quattro a lavorare sullo
+stesso identico cluster, coordinandosi su ogni run. In quattro non funziona. Adesso ognuno
+sviluppa sul proprio e la forma del cluster (quante macchine, che taglia) si concorda
+quando serve confrontare dei numeri.
 
-- **node0 NON è un worker:** possiede il volume e serve NFS; tenerlo fuori dal pool
-  (a) evita che diventi lo straggler, (b) lascia la sua RAM come cache NFS. In
-  `SSHCluster` il **primo host della lista è solo scheduler**; un host diventa anche
-  worker solo se ripetuto → in `cluster.txt` node0 compare **una volta sola**.
-- **Worker clonati da SNAPSHOT** dello scheduler: ereditano venv Dask e chiave
-  macchina del cluster → zero configurazione per-VM. I ruoli sono solo runtime
-  (l'ordine in `cluster.txt`), le VM sono identiche.
-- **SSHCluster dal notebook:** `known_hosts=None` (gli IP interni vengono riciclati),
-  `remote_python=~/pyvenv/bin/python` (senza, Dask non trova il venv sui nodi),
-  `worker_options={"nthreads": 4, "memory_limit": "7GB"}`. Il security group del
-  corso `pod-students` già permette il traffico intra-cluster: **non modificarlo mai**.
+**I dati si replicano, non si condividono.** Il `silver/` in Parquet è abbastanza piccolo
+da stare sul disco di ogni macchina, e ci arriva dall'**immagine snapshot**: ogni VM nasce
+già con la sua copia in `~/mapd-data/silver/`. Nessun file system di rete, nessuno script
+di montaggio, nessun ordine di avvio da rispettare.
+*Cosa costa:* prima c'era una copia sola e "identica ovunque" era gratis; adesso ci sono N
+copie indipendenti. Il funzionamento dipende dal fatto che il **path sia identico su tutte
+le macchine** e che i dati siano davvero gli stessi. Se un domani il `silver/` cambia, va
+rifatta l'immagine: aggiornarne una sola darebbe risultati sbagliati **senza nessun
+errore visibile**, che è il guasto peggiore da diagnosticare.
 
-### Il volume dati (`mapd-data`, 200 GB Ceph) e l'NFS
+**La prima macchina fa solo da scheduler.** In `SSHCluster` il primo host della lista è
+scheduler e basta; diventa anche worker solo se lo ripeti. Lo teniamo fuori dal pool per
+tre motivi — nessuno dei quali è più l'NFS, che era la ragione originaria ed è morta con
+lui:
+1. quella macchina non è ferma: ci girano lo **scheduler** (il coordinatore) e il
+   **processo da cui lanci**, quello che riceve i risultati finali;
+2. su macchine da 4 GB un worker che sfonda il tetto viene ucciso — è già successo, tre
+   worker su quattro a metà run (`local/NOTES.md` v6). Se succede sulla macchina che
+   coordina, non perdi un worker: rischi il run intero;
+3. i benchmark "tempo vs numero di worker" si interpretano solo se i worker sono
+   intercambiabili. Uno che divide la macchina con scheduler e driver è sistematicamente
+   più lento e piega la curva per motivi che non c'entrano con l'algoritmo.
 
-Un volume OpenStack si attacca a **una sola VM per volta** → lo attacchiamo a node0 e
-condividiamo via NFS. Contiene TUTTO ciò che deve sopravvivere alle VM: il raw
-scaricato con kagglehub (`/data/kagglehub/.../CORD-19-research-challenge/versions/111`
-= input della pipeline), il clone del repo e quindi l'output `data/`.
+**Macchine tutte della stessa taglia.** Dask assegna il lavoro dando per scontato che i
+worker siano equivalenti: il più piccolo diventa il freno di tutti, e i tempi non si
+sanno più spiegare.
 
-Lo script **idempotente** `scripts/cluster_storage_up.sh` (da lanciare su node0) fa
-tutto in un colpo: monta `/dev/vdb` su `/data` (**MAI `mkfs`** — si fa solo la
-primissima volta, riformattare = cancellare i dati), installa/esporta NFS verso
-`10.67.22.0/24`, e via SSH monta `/data` **sullo stesso path** su ogni worker
-(IP letti da `cluster.txt`), verificando che i dati si vedano. Teardown speculare:
-`bash scripts/cluster_storage_up.sh --down`.
+**Niente Docker** (vincolo del corso): il cluster è reale, installato e gestito a mano.
+**Il security group `pod-students`** permette già il traffico tra le macchine: si
+seleziona e non si tocca, è condiviso con tutto il corso.
 
-### Ciclo di vita di una sessione di lavoro (il progetto OpenStack è CONDIVISO col corso)
+**Le macchine non si cancellano a fine sessione** — regola ribaltata rispetto alla fase
+precedente. Senza volume condiviso i risultati stanno sui dischi delle macchine, quindi
+distruggerle vuol dire buttare il lavoro. In compenso i risultati vanno **scaricati** sul
+portatile: sono pochi megabyte, e finché stanno su una macchina sola sono a rischio.
+Tensione da tenere presente: la guida del corso raccomanda di essere parsimoniosi perché
+il pool di risorse è condiviso con tutti gli studenti.
 
-1. Lancia le VM dallo snapshot (dashboard) → aggiorna `cluster.txt` con gli IP nuovi.
-2. Attacca il volume `mapd-data` a node0 (dashboard) → `bash scripts/cluster_storage_up.sh`.
-3. Lavora (notebook via nbconvert su copia throwaway, vedi §6).
-4. Fine sessione: `cluster_storage_up.sh --down` → detach del volume → **CANCELLA le
-   VM** (la quota è condivisa con tutta la coorte). Volume e snapshot persistono:
-   ricreare il cluster costa minuti.
+**Cosa cambia per i benchmark, ed è la buona notizia.** Con l'NFS tutto l'I/O passava da
+una macchina sola: accettabile per la conversione (un one-shot legato al disco), ma
+avrebbe falsato le curve. Adesso **ogni worker legge dal proprio disco**, quindi la
+lettura è parallela davvero e i benchmark misurano il calcolo invece della coda sulla
+rete. È un punto da mettere nella relazione, non solo una nota tecnica.
 
-Vincolo del corso: **niente Docker** — cluster installato e gestito a mano.
-Caveat accettato: l'NFS incanala tutto l'I/O sul singolo node0 — va bene perché la
-conversione è un one-shot I/O-bound; i **benchmark obbligatori** (tempo vs partizioni
-/ vs worker) si fanno sui 4 task che leggono Parquet (CPU-bound, scalano davvero).
+**Il volume da 200 GB esiste ancora**, staccato, con i dati grezzi e i Parquet completi.
+Non lo usa più nessuno: serviva alla conversione. Per la stessa ragione
+`scripts/cluster_storage_up.sh` (montaggio + export NFS) **non si lancia più**.
 
 ---
 
-## 6 · Contratto di esecuzione del notebook
+## 6 · Come si esegue il codice
 
-`conversion_sanification.ipynb` è l'**unica** pipeline (i vecchi `.py` sono stati
-consolidati lì). Gira invariato su Mac e VM perché tutto passa da env var:
+**I task si lanciano come file `.py`, da terminale.** I notebook (`Giulia/word_count.ipynb`,
+`daniele/task_2_3_3_title_embeddings.ipynb`) sono **documentazione**: spiegano e articolano
+le scelte, non sono il modo in cui il codice gira. Il `.py` è la fonte di verità e il
+notebook lo **importa** — mai copia-incolla, mai `subprocess`.
+
+```bash
+source ~/pyvenv/bin/activate                       # sul Mac: conda activate mapd-covid
+python Giulia/word_count.py ~/mapd-data/silver/paragraphs --out ~/mapd-out/word_count
+```
+
+**Dove gira lo decide `cluster.txt`, non il codice.** È la convenzione comune a tutti i
+task, e nel codice non compare mai un IP:
+
+| Cosa trova il codice | Cosa fa |
+|---|---|
+| `DASK_SCHEDULER` impostata | si collega a uno scheduler già acceso |
+| `cluster.txt` (o `CORD19_HOSTS`) | avvia un `SSHCluster` sugli host elencati; **il primo è solo scheduler** |
+| niente | `LocalCluster`, dimensionato sui core della macchina — sviluppo sul Mac |
+
+All'avvio viene stampato un blocco con modalità, host, worker, thread e memoria:
+**va letto**, perché è l'unica difesa contro un run che sembra "un cluster lento" mentre
+in realtà sta girando su una macchina sola (§8.6).
+
+### La pipeline di conversione — fase conclusa, qui per riferimento
+
+`conversion_sanification.ipynb` ha prodotto il `silver/` e **non fa parte
+dell'assignment**: non va rieseguita salvo che i dati debbano cambiare. Gira invariata su
+Mac e cluster perché tutto passa da variabili d'ambiente:
 
 | Env var | Default | Significato |
 |---|---|---|
@@ -224,8 +291,9 @@ consolidati lì). Gira invariato su Mac e VM perché tutto passa da env var:
 | `CORD19_PARA_BATCH` | `448` | partizioni per blocco nella scrittura batched del silver/paragraphs (§7) |
 | `CORD19_SSH_KEY` | `~/.ssh/id_rsa` | chiave privata per SSHCluster |
 
-**Sulla VM si esegue headless su una copia usa-e-getta**, così il file tracciato resta
-byte-pulito e `git pull` non confligge mai (il notebook committato è output-free):
+Se un giorno va rieseguita, **si esegue headless su una copia usa-e-getta**, così il file
+tracciato resta byte-pulito e `git pull` non confligge mai (il notebook committato è
+output-free):
 
 ```bash
 jupyter nbconvert --to notebook --execute \
@@ -315,50 +383,80 @@ o worker da 16 GB.
 
 ## 8 · Regole e invarianti per chi scrive codice (checklist per gli agenti)
 
-1. **Non rigenerare `data/` in locale**: quello che c'è ora è l'output del run VM
-   completo; il dump locale è più vecchio e piccolo. Per provare la pipeline:
-   `CORD19_SAMPLE=N` → scrive in `data_sample/`.
-2. **Niente numeri assoluti negli assert** (i due dump differiscono): solo garanzie
-   strutturali; i check quantitativi sono già guardati da `if not SAMPLE`.
-3. **Zero pandas lato driver** nella pipeline: il corpus VM non entra nel driver.
-   Uniche raccolte driver ammesse (piccole e motivate): mappe di linkage, set
-   `pmc_uids`, valori distinti dei paesi.
-4. **Pitfall di dask-expr 2026.6** (tutti verificati sulla nostra versione):
+0. **Prima di proporre qualcosa, leggi `docs/DECISIONI.md`.** Le scelte già prese sono
+   motivate e misurate: rimetterle in discussione senza un fatto nuovo fa buttare via una
+   sessione di lavoro.
+1. **La semplicità è un requisito, non un gusto.** Questo è un esercizio universitario da
+   discutere all'orale: il codice va **saputo spiegare**, quindi la complessità che non si
+   sa giustificare è un difetto e non una raffinatezza. C'è già un precedente costoso:
+   `bench.py` è cresciuto oltre lo scopo del corso e va rifatto per questo motivo.
+2. **Non rigenerare i dati.** `data/` sul Mac e `~/mapd-data/silver/` sul cluster sono
+   l'output del run di conversione completo, già validato. Per provare la pipeline (se
+   proprio serve): `CORD19_SAMPLE=N` → scrive in `data_sample/`.
+3. **Niente numeri assoluti negli assert** (dump diversi danno conteggi diversi): solo
+   garanzie strutturali; i check quantitativi sono già guardati da `if not SAMPLE`.
+4. **Zero pandas lato driver:** il corpus non entra nel processo da cui lanci. Uniche
+   raccolte ammesse (piccole e motivate): mappe di linkage, set `pmc_uids`, valori
+   distinti dei paesi.
+5. **Pitfall di dask-expr 2026.6** (tutti verificati sulla nostra versione):
    `value_counts().reset_index()` dentro un merge → `KeyError None` (usare
    `groupby.size().reset_index()`); `groupby.transform` dopo shuffle → errore di
    reindex (usare size+merge); `repartition(partition_size=...)` sotto un Client
-   distribuito → **hang** (usare `row_group_size` + `split_row_groups`).
-5. **Modello di memoria:** una lista costruita dentro una task NON è spillabile →
-   il picco per-task si controlla con la granularità di estrazione (`NPART_*`) e le
-   thread, non con le soglie di spill. Testo su worker long-lived → pattern
-   blocchi+restart (§7, Atto 3).
-6. **Portabilità Mac↔VM:** mai hard-codare path o IP; tutto via env var / `cluster.txt`
-   (git-ignored); il notebook committato resta output-free; sulla VM si esegue su
-   copia throwaway.
-7. **Grafo piccolo:** i work-item del Bag sono **solo filename** (il path si
-   ricostruisce nel worker); gli schemi Arrow si passano **espliciti** a `to_parquet`
-   (aggira l'inferenza sulle partizioni all-null).
-8. **Cloud Veneto:** non toccare il security group condiviso `pod-students`; VM
-   cancellate a fine sessione; mai `mkfs` sul volume; NFS = tutto l'I/O raw passa da
-   node0 (accettato per la conversione one-shot, non per i benchmark).
+   distribuito → **si impianta** (usare `row_group_size` + `split_row_groups`);
+   lo **shuffle P2P** non riesce a ricostruire la propria spec quando il grafo nasce da
+   un Bag (`RuntimeError: P2P … failed during transfer phase`) → forzare
+   `dask.config.set({"dataframe.shuffle.method": "tasks"})`.
+6. **Partizioni ≠ file.** `read_parquet` su `silver/paragraphs` restituisce **990
+   partizioni da 1979 file**: l'ottimizzatore aggrega i file piccoli. Non è un dato
+   mancante, ma i due numeri non vanno confusi quando si leggono i benchmark.
+7. **Modello di memoria:** una lista costruita dentro una task NON è spillabile → il picco
+   per-task si controlla con la granularità delle partizioni e con le thread, non con le
+   soglie di spill. In Dask **Bag**, ogni operazione tipo-groupby (`foldby`,
+   `frequencies`, `groupby`) collassa in **una sola partizione**: se la coda del calcolo è
+   lenta e un solo worker lavora, è quello. Il DataFrame ha `split_out`, il Bag no.
+8. **Portabilità:** mai hard-codare path o IP — gli host vivono in `cluster.txt`
+   (git-ignored), i path relativi si risolvono sulla **radice della repo** e non sulla
+   cartella da cui lanci. **Niente fallback silenziosi:** la configurazione del cluster va
+   stampata sempre, perché un run su una macchina sola sembra un cluster lento e te ne
+   accorgi a sessione bruciata.
+9. **Niente di prezioso dentro la repo.** I risultati vanno in `~/mapd-out/`: sul cluster
+   la repo si cancella e si riclona di continuo.
+10. **Grafo piccolo:** i work-item del Bag sono **solo filename** (il path si ricostruisce
+    nel worker); gli schemi Arrow si passano **espliciti** a `to_parquet` (aggira
+    l'inferenza sulle partizioni all-null).
+11. **Cluster:** non toccare il security group condiviso `pod-students`; macchine tutte
+    della stessa taglia; la prima è solo scheduler; le VM **non** si cancellano a fine
+    sessione (i risultati stanno sui loro dischi) ma i risultati si scaricano;
+    `scripts/cluster_storage_up.sh` appartiene all'architettura NFS e non si lancia più.
 
 ---
 
 ## 9 · Stato attuale e prossimi passi
 
-**Fatto:** esplorazione; architettura bronze/silver; pipeline consolidata e
-fully-Dask; cluster + volume + NFS operativi e scriptati; tre round di fix OOM;
-**run completo sul corpus VM riuscito**; output scaricato in `data/` sul Mac.
+**Fatto:** esplorazione dei dati grezzi; architettura bronze/silver; conversione completata
+sul corpus intero dopo tre round di fix OOM; dati validati e definitivi, oggi replicati su
+ogni macchina; **task 1 (word count) finito e validato** sul corpus intero; architettura
+del cluster rifatta (un cluster per persona, senza NFS).
 
-**In sospeso / prossimi passi:**
-- Committare il diff pendente di `conversion_sanification.ipynb` (restart
-  post-`pmc_uids` + rimozione assert 406211): è la versione che ha completato il run.
-- Aggiornare i conteggi in `DATA_DICTIONARY.md` ai numeri del run completo (§4).
-- Accesso SSH dei compagni alle VM (runbook pronto in `docs/SETUP_CLOUDVENETO.md`).
-- I 4 task di analisi (compagni) sopra il silver + **benchmark obbligatori**
-  (tempo vs n. partizioni e vs n. worker) — senza benchmark l'analisi è incompleta.
-  Per i benchmark seguire la ricetta anti-memory-creep di `docs/MEMORY_LEAK_REPORT.md`
-  §7 (niente churn broadcast, `pre-spawn-environ`, sweep tra le misure, NO
-  `client.restart()` tra le ripetizioni).
-- Alla prossima sessione cluster: controprova su glibc dell'Atto 4 (~20 min,
-  `scripts/leaklab.py --variants base,fast-isin,trimenv` sulla VM).
+**Prossimi passi, in ordine di importanza:**
+
+1. **I benchmark obbligatori** (tempo vs numero di partizioni, tempo vs numero di worker).
+   Senza, l'analisi è considerata incompleta dal corso. **L'impalcatura va rifatta da
+   zero:** `bench.py` e `Giulia/bench_word_count.py` hanno accumulato complessità che il
+   gruppo non è in grado di giustificare all'orale — non vanno estesi né usati come base.
+   Prima si decide la forma della misura, poi si scrive il minimo che serve.
+   Vincoli già noti e misurati: i benchmark si fanno **sul corpus vero** (sul campione una
+   macchina batte quattro, perché a quella scala è tutto overhead); il sweep sulle
+   partizioni usa `repartition(npartitions=k)` su una fetta **fissa** di dati, altrimenti
+   si misura la quantità di dati invece del partizionamento; su `SSHCluster` il numero di
+   worker si può solo ridurre rispetto alla lista di `cluster.txt`.
+2. **Task 2.3.2 (paesi e istituti) da riscrivere:** l'unica versione esistente
+   (`Giulia/old/scripts/task_2_3_2_affiliation_representation.py`) **non è distribuita** —
+   è uno scan in un processo solo. In un esame di calcolo distribuito è il problema più
+   grave che ci sia rimasto.
+3. **Task 2.3.3 / 2.3.4 (title embeddings e cosine similarity):** esiste una prima
+   soluzione in `daniele/`, documentata in `daniele/SOLUZIONE_2_3_3.md`.
+4. **Applicare la convenzione `~/mapd-out`** ai default del codice: si fa insieme al
+   rifacimento dei benchmark, perché tocca lo stesso file condiviso.
+5. **Stop-word non inglesi** (direzione già scelta: dare al tedesco, francese, spagnolo e
+   portoghese le loro liste invece di scartare i paper). Da fare dopo i benchmark.

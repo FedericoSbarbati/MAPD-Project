@@ -186,10 +186,11 @@ contenuto**, nemmeno generiche come `study` o `data`, perché è una decisione d
 non di pulizia — lo stesso principio del layer silver.
 
 **Il filtro `is_reference_like` è attivo per definizione, non per risultato.**
-Sono l'1,24% dei paragrafi e per giunta corti (477 caratteri contro 867): togliendoli,
-nella top-30 non entra né esce nessuna parola, cambia lo 0,45% delle occorrenze. Lo
-teniamo perché una dichiarazione di conflitto d'interessi non è corpo del paper, e
-perché è gratis. Non perché migliori la classifica.
+Sul corpus intero sono 235.914 paragrafi, l'**1,90%**, e per giunta corti — 304 caratteri
+di media contro 785 — quindi pesano solo lo **0,74% del testo**. Sulla fetta su cui è stato
+misurato l'effetto, togliendoli non entra né esce nessuna parola dalla top-30 e cambia lo
+0,45% delle occorrenze. Li scartiamo perché una dichiarazione di conflitto d'interessi non
+è corpo del paper, e perché è gratis. Non perché migliori la classifica.
 
 ## Il vincolo distribuito che decide tutto
 
