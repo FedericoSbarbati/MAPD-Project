@@ -283,19 +283,30 @@ worker per core (IP ripetuto in `cluster.txt`).
 (4 worker, 16 thread, 7,1 GB ciascuno — la configurazione voluta). Due trappole che
 `LocalCluster` **non può** mostrare, entrambe riprodotte e verificate in locale:
 
-1. **Il codice non viaggiava col grafo.** cloudpickle manda per valore le funzioni di
-   `__main__` e per *riferimento* quelle importate da un modulo; lo scheduler, che nasce
-   via SSH dalla home, non ha il repo nel `sys.path` e non riesce a riaprire il grafo. Il
-   messaggio (*«Scheduler and Client have different environments»*) manda a cercare
-   versioni diverse: sotto c'era un `ModuleNotFoundError`. **Spiega anche perché non era
-   mai emerso**: `word_count.py` lanciato a mano ha le sue funzioni in `__main__`, quindi
-   gira; il benchmark le importa, quindi no. → `cluster.serializza_per_valore`
+1. **I dati sono replicati su ogni macchina, il codice no.** È l'asimmetria che
+   l'architettura non copriva. Nel grafo le funzioni importate viaggiano *per nome*,
+   quindi scheduler e worker devono poter importare `word_count`; via SSH nascono dalla
+   home, senza il repo nel `sys.path`. Il messaggio (*«Scheduler and Client have different
+   environments»*) manda a cercare versioni diverse: sotto c'era un `ModuleNotFoundError`,
+   **visibile solo nel log dello scheduler**. **Spiega anche perché non era mai emerso**:
+   `word_count.py` lanciato a mano ha le sue funzioni in `__main__`, che Dask spedisce per
+   valore; il benchmark le importa, quindi no. → `client.upload_file`, e da `word_count.py`
+   è uscito l'import di `cluster` (un modulo caricato così dev'essere autosufficiente).
 2. **Le cartelle di output non esistono sui worker.** `to_parquet` fa `mkdirs` sul client,
    ma scrivono i worker sui propri dischi, e fsspec apre con `auto_mkdir=False`: sarebbe
    stato il `FileNotFoundError` successivo. → `client.run(os.makedirs, ...)`
 
 Le due regole stanno in `PROJECT_CONTEXT.md` §8.12 perché **valgono per tutti e quattro i
-task**. Lezione di metodo: la prova generale sul campione ha validato la logica ma non
-poteva validare la *distribuzione*, perché in locale client, scheduler e worker
-condividono `sys.path` e file system. Non c'è modo di scoprirle prima del cluster — c'è
-solo il modo di riconoscerle in due minuti invece che in una notte.
+task**.
+
+**Vicolo cieco, annotato perché sembra la risposta giusta:**
+`cloudpickle.register_pickle_by_value(modulo)` non risolve — Dask consulta quel registro
+solo quando serializza *una funzione*, non quando serializza il grafo in blocco. Provato
+sul cluster, fallito allo stesso modo.
+
+**Lezione di metodo, che vale più delle due cure.** La prova generale sul campione valida
+la logica ma **non può** validare la distribuzione: in locale client, scheduler e worker
+condividono `sys.path` e file system. Non serve però il cluster per provarla — basta far
+partire scheduler e worker da una cartella fuori dal repo e collegarsi con
+`DASK_SCHEDULER` (ricetta in `PROJECT_CONTEXT.md` §8.12c). Dieci secondi, e riproduce
+entrambe le trappole. Trovata dopo aver bruciato due tentativi sul cluster vero.

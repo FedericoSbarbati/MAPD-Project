@@ -442,23 +442,34 @@ o worker da 16 GB.
     due trappole che il Mac non può mostrare — trovate il 2026-08-14, entrambe verificate.
     Valgono per tutti e quattro i task.
 
-    **a) Il codice deve viaggiare col grafo.** Dask serializza con cloudpickle, che manda
-    **per valore** le funzioni definite nel file che lanci (`__main__`) e **per
-    riferimento** quelle importate da un modulo. Il riferimento funziona solo se il modulo
-    è importabile anche dove il grafo viene riaperto: in locale sì, su `SSHCluster` no —
-    scheduler e worker nascono via SSH dalla home, senza il repo nel `sys.path`. Il
-    sintomo manda a cercare nel posto sbagliato:
+    **a) I dati sono replicati su ogni macchina, il codice no.** È l'asimmetria che
+    l'architettura attuale non copre, ed è la causa del guasto. Nel grafo che il client
+    spedisce, le funzioni importate da un modulo viaggiano **per nome** («prendi
+    `load_group` da `word_count`»), quindi **scheduler e worker devono poter importare
+    quel modulo**. In locale possono (stesso processo, stesso `sys.path`); su
+    `SSHCluster` no, perché nascono via SSH dalla home. Il sintomo manda a cercare nel
+    posto sbagliato:
 
     ```
     RuntimeError: Error during deserialization of the task graph. This frequently
     occurs if the Scheduler and Client have different environments.
     ```
 
-    Non sono gli ambienti: sotto c'è un `ModuleNotFoundError`. Cura: `cluster.py` →
-    `serializza_per_valore(modulo)`. Chi lancia un `.py` che **importa** le proprie
-    funzioni (il benchmark, il notebook) deve chiamarla; chi le definisce nel file che
-    lancia (`word_count.py`) no — ed è per questo che il word count girava e il benchmark
-    no.
+    Non sono gli ambienti: sotto c'è un `ModuleNotFoundError`, e **non lo vedi** — sta
+    nel log dello scheduler, non nell'eccezione del client.
+
+    **Cura:** `client.upload_file("Giulia/word_count.py")` dopo ogni `get_client`. Copia
+    il file su scheduler e worker e ce lo importa.
+    **Conseguenza sul modulo caricato:** deve essere importabile **da solo**, quindi non
+    può importare altra roba del repo. `word_count.py` importava `cluster` in cima e
+    l'upload falliva con `ModuleNotFoundError: No module named 'cluster'`; quell'import
+    è stato spostato dentro `main()`, che è l'unico posto che ne ha bisogno.
+    **Chi non ha il problema:** `python Giulia/word_count.py` lanciato a mano, perché lì
+    le funzioni stanno in `__main__` e Dask le spedisce per valore. È per questo che il
+    word count girava sul cluster e il benchmark no.
+    **Vicolo cieco già battuto:** `cloudpickle.register_pickle_by_value(modulo)` sembra
+    la cura giusta e non lo è — Dask lo consulta solo quando serializza *una funzione*,
+    non quando serializza il grafo in blocco.
 
     **b) Le cartelle di output esistono solo dove le hai create.** `to_parquet` fa
     `mkdirs` **sul client**, ma a scrivere sono i worker, ognuno sul proprio disco. fsspec
@@ -467,6 +478,20 @@ o worker da 16 GB.
     `client.run(os.makedirs, percorso, exist_ok=True)` dopo aver acceso il cluster.
     Corollario da ricordare: **l'output finisce sparso sui dischi dei worker**, e la
     cartella sulla macchina scheduler resta vuota, perché lì non gira nessun worker.
+
+    **c) Come si provano queste cose SENZA il cluster.** Serve solo che scheduler e worker
+    non vedano il repo — non che stiano su macchine diverse. Da una cartella qualsiasi
+    fuori dal repo:
+
+    ```bash
+    cd /tmp && dask scheduler --port 8799 & dask worker tcp://127.0.0.1:8799 &
+    cd ~/MAPD-Project && DASK_SCHEDULER=tcp://127.0.0.1:8799 python Giulia/<task>.py
+    ```
+
+    Riproduce in dieci secondi entrambe le trappole di sopra, e il log dello scheduler è
+    lì da leggere. È così che sono state trovate, dopo due tentativi bruciati sul cluster:
+    **la prova generale sul campione non basta, perché in locale client, scheduler e
+    worker condividono `sys.path` e file system.**
 
 ---
 

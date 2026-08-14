@@ -27,9 +27,12 @@ from pathlib import Path
 import dask
 import dask.bag as db
 
-# Creating the cluster is shared with the other three tasks and lives at the repo root.
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from cluster import get_client  # noqa: E402
+# NOTHING outside the standard library and Dask is imported here, and that is a
+# requirement rather than a coincidence: this module has to be IMPORTABLE ON THE
+# SCHEDULER AND ON THE WORKERS, which receive it as a single uploaded file and know
+# nothing about this repository. `from cluster import get_client` used to live here and
+# made that import fail; it now lives inside `main()`, which is the only place that
+# needs it. See bench_word_count.py, where the upload happens.
 
 # Global variables
 DEFAULT_INPUT = "data_sample/silver/paragraphs" # Default input path for the paragraphs dataset
@@ -329,6 +332,10 @@ def main():
     # the same thing, otherwise the defaults point at Giulia/data_sample/... and the
     # results land in Giulia/reports/.
     repo = Path(__file__).resolve().parent.parent
+    # Imported here and not at the top of the file: see the note next to the imports.
+    sys.path.insert(0, str(repo))
+    from cluster import get_client
+
     source = Path(args.input).expanduser()
     source = source if source.is_absolute() else repo / source
     out = Path(args.out).expanduser()

@@ -64,37 +64,6 @@ def available_workers(repo_root="."):
     return int(os.environ.get("CORD19_WORKERS", max(1, min(4, core // 2))))
 
 
-def serializza_per_valore(*moduli):
-    """Spedire il CODICE di questi moduli insieme al grafo, invece del loro nome.
-
-    Va chiamata da qualunque script che **importi** le proprie funzioni da un modulo
-    (`import word_count as wc`) invece di definirle nel file che si lancia.
-
-    Il perché, che costa una sessione se non lo si sa. Dask serializza il grafo con
-    cloudpickle, e cloudpickle ha due comportamenti diversi:
-
-        funzione definita nel file che lanci  -> vive in `__main__` -> spedita PER VALORE
-        funzione importata da un modulo       -> spedita PER RIFERIMENTO, cioe' come
-                                                 "importa `word_count` e prendi `load_group`"
-
-    Il secondo caso funziona solo se `word_count` e' importabile **anche dove il grafo
-    viene riaperto**. Su `LocalCluster` lo e' (stesso processo, stesso `sys.path`), su
-    `SSHCluster` no: scheduler e worker nascono via SSH dalla home, senza il repo nel
-    `sys.path`. Il sintomo e' un errore che punta altrove:
-
-        RuntimeError: Error during deserialization of the task graph. This frequently
-        occurs if the Scheduler and Client have different environments.
-
-    Non sono gli ambienti: e' un `ModuleNotFoundError` a valle. Registrando il modulo
-    per valore, il grafo diventa autosufficiente e non serve che il codice esista sulle
-    altre macchine. Costa qualche KB nel grafo.
-    """
-    import cloudpickle
-
-    for modulo in moduli:
-        cloudpickle.register_pickle_by_value(modulo)
-
-
 def configure_memory():
     """Le impostazioni che tengono piatta la RAM dei worker su lavori lunghi di testo.
 

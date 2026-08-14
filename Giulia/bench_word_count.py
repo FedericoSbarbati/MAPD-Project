@@ -53,16 +53,10 @@ sys.path.insert(0, str(REPO / "Giulia"))
 from distributed import performance_report, wait  # noqa: E402
 
 import word_count as wc  # noqa: E402
-from cluster import available_workers, get_client, serializza_per_valore  # noqa: E402
+from cluster import available_workers, get_client  # noqa: E402
 
-# OBBLIGATORIO, e non e' un dettaglio: qui `word_count` e' IMPORTATO, non definito. Senza
-# questa riga cloudpickle mette nel grafo il *nome* delle sue funzioni invece del codice,
-# e su `SSHCluster` lo scheduler - che nasce via SSH dalla home, senza il repo nel
-# sys.path - non riesce a riaprire il grafo. Muore con "Error during deserialization of
-# the task graph ... different environments", che manda a cercare nel posto sbagliato.
-# `python Giulia/word_count.py` non ha il problema perche' li' le funzioni stanno in
-# `__main__`, che cloudpickle spedisce gia' per valore. -> cluster.serializza_per_valore
-serializza_per_valore(wc)
+# Il file che va spedito a tutte le macchine prima di calcolare: vedi `misura`.
+CODICE = REPO / "Giulia" / "word_count.py"
 
 DEFAULT_INPUT = "data_sample/silver/paragraphs"   # senza argomenti si prova sul campione
 DEFAULT_OUT = "~/mapd-out/bench"                  # fuori dalla repo: sul cluster e' usa-e-getta
@@ -216,12 +210,23 @@ def misura(p, files, args):
                                      n_workers=p["worker"], n_threads=p["thread"])
         riga.update(stato_cluster(client))   # appena acceso: la configurazione verificata
 
-        # Il vocabolario lo scrivono I WORKER, ognuno sul proprio disco, e `to_parquet`
-        # crea la cartella solo qui sul client. Senza questa riga il primo task di
-        # scrittura muore con FileNotFoundError su ogni macchina che non ce l'ha: fsspec
-        # apre in scrittura con `auto_mkdir=False` e non crea le cartelle mancanti.
-        # E' anche il motivo per cui la cartella sulla macchina scheduler resta VUOTA a
-        # fine run: li' non gira nessun worker.
+        # 1. MANDARE IL CODICE. Su questo cluster i dati sono replicati su ogni macchina,
+        #    il codice no: sta solo su quella da cui lanci. Ma nel grafo che spediamo le
+        #    funzioni viaggiano PER NOME ("prendi `load_group` da `word_count`"), quindi
+        #    scheduler e worker devono poter importare quel modulo. `upload_file` copia il
+        #    file su tutte le macchine e ce lo importa. Senza, il run muore subito con
+        #    "Error during deserialization of the task graph ... different environments",
+        #    che manda a cercare versioni diverse invece di un modulo mancante.
+        #    (`python Giulia/word_count.py` non ha il problema: lanciato a mano le sue
+        #    funzioni stanno in `__main__`, e quelle Dask le spedisce per valore.)
+        client.upload_file(str(CODICE))
+
+        # 2. CREARE LE CARTELLE. Il vocabolario lo scrivono I WORKER, ognuno sul proprio
+        #    disco, mentre `to_parquet` crea la cartella solo qui sul client. Senza questa
+        #    riga il primo task di scrittura muore con FileNotFoundError su ogni macchina
+        #    che non ce l'ha: fsspec apre in scrittura con `auto_mkdir=False`. E' anche il
+        #    motivo per cui la cartella sulla macchina scheduler resta VUOTA a fine run:
+        #    li' non gira nessun worker.
         client.run(os.makedirs, str(vocabolario), exist_ok=True)
 
         collezioni, riga["partizioni"] = lavoro(files, p["k"], p["split_out"], vocabolario)
