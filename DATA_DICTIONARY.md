@@ -28,7 +28,7 @@ same content, the full corpus. It is **not regenerated**: the JSON→Parquet con
 
 | Task | Dataset | Columns to read |
 |---|---|---|
-| 2.3.1 — word-count (body text) | `silver/paragraphs` | `text` (optionally filter `~is_reference_like`) |
+| 2.3.1 — word-count (body text) | `silver/paragraphs` | `cord_uid`, `text` |
 | 2.3.2 — countries & institutes | `silver/paper_countries` / `silver/paper_institutions` (per-paper) or `silver/authors` (per-author) | `country` / `institution_norm` |
 | 2.3.3 / 2.3.4 — title embeddings & cosine | `silver/papers` | `cord_uid`, `title`, `title_norm`, `is_title_unique` |
 
@@ -55,9 +55,11 @@ pd.read_parquet("data/silver/papers", columns=["cord_uid", "title", "is_title_un
 | `silver/paper_countries` | 284,042 | 64 | — |
 | `silver/paper_institutions` | 517,911 | 48 | — |
 
-> ⚠️ **Files ≠ partitions.** `dd.read_parquet("silver/paragraphs")` yields **990**
-> partitions from 1979 files: the optimizer coalesces small ones. Nothing is missing —
-> but don't confuse the two numbers when reading a benchmark.
+> ⚠️ **Files ≠ partitions, and the count depends on the SHAPE OF THE QUERY.** Reading
+> `silver/paragraphs` with three columns and a boolean filter used to run on **990**
+> partitions out of 1979 files (the optimizer coalesces small ones); the plain two-column
+> read the word count does today gives **1979**. Nothing is missing — but read the number
+> the script prints, don't assume it.
 
 ---
 
@@ -95,7 +97,7 @@ per paper (pmc is cleaner and always present); a paper never keeps both sources 
 | `para_idx` | int32 | paragraph position within the document |
 | `section` | string | **raw & very dirty** (free-text misparses) — do not use as a category |
 | `text` | string | paragraph text, verbatim (no tokenization applied). **Never null** |
-| `is_reference_like` | bool | heuristic flag for references/acknowledgements/funding/conflict sections: 235,914 rows = **1.90%** — excluded by default in the word count |
+| `is_reference_like` | bool | heuristic flag for references/acknowledgements/funding/conflict sections: 235,914 rows = **1.90%**. Available, but no task filters on it: the word count used to and stopped, because dropping them changed no word in the top 20 |
 
 Citation offsets (`cite_spans`/`ref_spans`) were intentionally dropped (no task uses them).
 `bronze/paragraphs` (23,110,668 rows) keeps **both** sources, if you need the pdf parse.

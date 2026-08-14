@@ -98,8 +98,15 @@ riscrivi qui.
 - **Dask Bag, non DataFrame:** è la struttura raccomandata dal testo dell'assignment.
 - **Map/Reduce in due fasi, fedele allo spec, anche se costa 2,8×** rispetto alla riduzione
   diretta. È l'algoritmo che il testo *definisce*; il costo è stato misurato invece che
-  subito. La verifica dell'invariante è opt-in (`--check`) perché raddoppia il tempo.
-  → `local/NOTES.md` v1
+  subito. → `local/NOTES.md` v1
+- **L'invariante Map/Reduce è verificato una volta, non a ogni run.** Le occorrenze prima
+  e dopo la riduzione coincidono (785.753.529 sul corpus intero): il controllo vive nel
+  notebook, che è il posto di una dimostrazione. Nello script era un'opzione `--check` che
+  raddoppiava il tempo e non è mai stata la strada normale. *Deciso il 2026-08-13.*
+- **In `word_count.py` c'è UNA sola fase Map**, quella dello spec. Le due varianti da
+  esperimento (una entry per occorrenza, una per partizione) sono uscite dal file: sono i
+  bracci di una misura, e vivranno nel file del benchmark se quella misura si farà.
+  *Deciso il 2026-08-13.*
 - **Si riduce sulla PAROLA, non su `(documento, parola)`**, contando prima dentro la
   partizione (il *combiner* del MapReduce classico). La chiave sbagliata cresce col numero
   di documenti e fa morire il job sul 10% del corpus. → `local/NOTES.md` v4
@@ -114,9 +121,16 @@ riscrivi qui.
   artefatti di *questo* corpus (`et`/`al`, `fig`, `table`). **Non si tolgono parole di
   contenuto**, nemmeno generiche come `study` o `data`: sarebbe una decisione di analisi,
   non di pulizia. → `local/NOTES.md` v2
-- **`is_reference_like` si filtra per definizione, non per risultato:** sul corpus intero è
-  l'1,90% dei paragrafi e lo 0,74% del testo, e non muove nessuna parola nella top-30 — ma
-  una dichiarazione di conflitto d'interessi non è corpo del paper. → `local/NOTES.md` v3
+- **`is_reference_like` NON si filtra più: il word count conta tutti i paragrafi del
+  `silver`.** Era l'1,90% dei paragrafi e lo 0,74% del testo, e non muoveva nessuna parola
+  nella top-20 (verificato di nuovo dopo la rimozione: stesse parole, stesso ordine).
+  Costava un'opzione da riga di comando e un ramo in due lettori diversi: una differenza
+  che non si vede non paga quel codice. La colonna resta nel `silver`.
+  *Deciso il 2026-08-13, sostituisce «si filtra per definizione» → `local/NOTES.md` v3.*
+- **Il numero di partizioni dipende dalla forma della query, non solo dai file.** Tolto il
+  filtro, la stessa cartella di 1979 file è passata da **990 a 1979** partizioni eseguite.
+  Non è un parametro: si legge dal `print` dello script prima di interpretare un
+  benchmark. → `Giulia/README.md`, `PROJECT_CONTEXT.md` §8.6
 - **Direzione scelta e non ancora realizzata:** al testo non inglese si danno le sue
   stop-word (tedesco, francese, spagnolo, portoghese), invece di scartare quei paper.
   → `local/NOTES.md`, "Da vedere in futuro"
@@ -126,13 +140,28 @@ riscrivi qui.
 - **I benchmark si fanno sul corpus vero, non sul campione.** Sul campione una macchina
   batte quattro, perché a quella scala il tempo è tutto overhead di coordinamento.
   → `local/NOTES.md` v5
-- **Il sweep sulle partizioni tiene i dati fissi:** `repartition(npartitions=k)` su una
-  fetta fissa. Fette di corpus crescenti misurano la quantità di dati, non il
-  partizionamento — è l'errore del vecchio benchmark. E `partition_size=…` si impianta
-  sotto un cluster distribuito.
-- **`bench.py` e `Giulia/bench_word_count.py` sono in revisione: non si estendono e non si
-  usano come base.** Sono cresciuti oltre lo scopo del corso fino a diventare
-  ingiustificabili all'orale. Vanno rifatti da zero, decidendo prima la forma della misura.
+- **Le curve obbligatorie sono DUE** — tempo vs numero di partizioni, tempo vs numero di
+  worker — e non ce ne sono altre. Tutto il resto è un run che si fa una volta e di cui si
+  scrive il numero. *Rifatti da zero il 2026-08-13: `bench.py` (497 righe) è diventato
+  `cluster.py`, che accende il cluster e basta; `Giulia/bench_word_count.py` (451 righe,
+  dieci blocchi) è una campagna sola da ~130 righe.*
+- **Lo sweep sulle partizioni tiene i dati fissi**, e `k` si ottiene **raggruppando i file
+  in lettura**, non con un `repartition` a valle: quello lascerebbe la lettura sempre alla
+  stessa granularità e metterebbe nel cronometro il costo della ricucitura. Fette di corpus
+  crescenti misurano la quantità di dati, non il partizionamento.
+- **Il numero di worker si cambia accendendo un cluster nuovo** con i primi *N* host di
+  `cluster.txt`, non con `scale()`: su `SSHCluster` si può solo scendere, il che obbliga a
+  ricordarsi un ordine di esecuzione ed è già costato una campagna misurata su un worker
+  solo. Costa un minuto a punto e ogni misura parte da uno stato pulito.
+- **Si cronometra il lavoro che si consegna**, scrittura del vocabolario compresa. Il crash
+  dell'11 agosto stava proprio nella scrittura, cioè nel pezzo che il vecchio benchmark
+  saltava misurando la sola `topk`.
+- **Lo script misura, il notebook disegna.** Il `.py` scrive un CSV riga per riga; i
+  grafici stanno nel notebook. Così una campagna di ore non dipende da un notebook aperto,
+  e per rifare un grafico non si rioccupa il cluster.
+- **`performance_report` sempre con `mode="inline"`**: senza, l'HTML scarica BokehJS da un
+  CDN e resta bianco appena lo si apre senza internet — cioè dopo averlo copiato giù dal
+  cluster, che è l'unico momento in cui lo si guarda.
 
 ---
 
@@ -165,3 +194,30 @@ Rifare i benchmark da zero (priorità 1) · riscrivere il 2.3.2, oggi non distri
 applicare `~/mapd-out` ai default del codice · verificare i core per flavor sulla
 dashboard · `daniele/SOLUZIONE_2_3_3.md` cita ancora 406.211 righe per `silver/papers`
 (vere: 970.836) — **lasciato apposta**, è il documento di un compagno.
+
+---
+## 2026-08-14
+
+**Decisioni + perché**
+Impalcatura benchmark buttata (948 righe, **zero misure prodotte**) → `cluster.py` accende
+il cluster e basta, `bench_word_count.py` è una campagna sola che gira una notte da sola;
+lo script misura e scrive un CSV, il notebook disegna. `k` partizioni si ottiene
+raggruppando i file (`repartition` metterebbe la ricucitura nel cronometro) e il numero di
+worker accendendo un cluster nuovo coi primi *N* host (su `SSHCluster` `scale()` scende e
+basta, e obbliga a ricordare un ordine). Da `word_count.py` tolti `--check`, il filtro
+`is_reference_like` (top-20 identica) e i due Map da esperimento: erano bracci di misure
+mai eseguite. **Regole sostituite in Parte A:** invariante opt-in, `is_reference_like` "si
+filtra per definizione", "`bench.py` in revisione", sweep partizioni via `repartition`.
+
+**Collegamenti toccati**
+`cluster.py` (ex `bench.py`, +`available_workers`) ← `word_count.py` e
+`bench_word_count.py` → CSV in `~/mapd-out/bench/` → `word_count.ipynb` §9, che ora
+disegna (grafici usciti dall'impalcatura) · README, PROJECT_CONTEXT §2/§8.6/§9,
+DATA_DICTIONARY, CLAUDE.md allineati.
+
+**Thread aperti**
+Lanciare la campagna sul cluster (mai misurato per davvero: solo campione) · verificare
+che la porta 8786 si liberi fra un cluster e il successivo (pausa 10 s, non provata su
+SSH) · misurato: `word_count.py` calcolava tutto **due volte**, risolto con `persist()` ·
+partizioni passate da 990 a 1979 togliendo il filtro — dipendono dalla forma della query ·
+2.3.2 ancora non distribuito.

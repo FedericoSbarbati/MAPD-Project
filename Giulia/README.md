@@ -7,10 +7,10 @@ raccomandata dal testo: «we recommend utilizing the RDD/Bag data structure»).
 |---|---|
 | `word_count.py` | l'implementazione: funzioni pure + un `main()` per lanciarla da terminale |
 | `word_count.ipynb` | il notebook, che **importa** il modulo — nessun codice duplicato, nessun sottoprocesso |
-| `bench_word_count.py` | la campagna di benchmark, un blocco per invocazione — vedi sotto |
+| `bench_word_count.py` | la campagna di benchmark: **un comando, e gira da sola** — vedi sotto |
 
-Dipendenze condivise col resto del progetto: `bench.py` alla root (creazione del Client
-e strumenti di misura). Nessun ambiente Python separato: si usa quello del progetto
+Dipendenze condivise col resto del progetto: `cluster.py` alla root, che accende il
+cluster e stampa com'è fatto. Nessun ambiente Python separato: si usa quello del progetto
 (`mapd-covid` sul Mac, `~/pyvenv` sulla VM).
 
 ## L'algoritmo
@@ -69,21 +69,17 @@ senza quel file parte un `LocalCluster`, con quel file un `SSHCluster` sui nodi 
 ```bash
 python Giulia/word_count.py                                   # campione, cluster locale
 python Giulia/word_count.py data/silver/paragraphs             # corpus completo
-python Giulia/word_count.py data/silver/paragraphs --check     # + verifica dell'invariante
 ```
 
 | opzione | effetto |
 |---|---|
-| `--out DIR` | dove scrivere (default `reports/word_count`, git-ignored) |
+| `--out DIR` | dove scrivere (default `~/mapd-out/word_count`, **fuori dalla repo**) |
 | `--top N` | quante parole esportare e mettere nel grafico |
 | `--partitions N` | usa solo le prime N partizioni — smoke test |
-| `--keep-references` | non scartare i paragrafi `is_reference_like` |
-| `--check` | verifica l'invariante Map/Reduce (raddoppia il tempo) |
+| `--split-out N` | in quante parti spezzare il reduce finale (default 16); `0` = `Bag.foldby`, più lento — vedi sotto |
 
 Output: `top_words.csv`, `top_words.png` (il barplot che l'assignment chiede) e
 `word_counts/` in Parquet col vocabolario completo.
-
-| `--split-out N` | in quante parti spezzare il reduce finale (default 16); `0` = `Bag.foldby`, più lento — vedi sotto |
 
 ### Su Cloud Veneto
 
@@ -185,12 +181,13 @@ e i rimandi a figure e tabelle. Regola che ci siamo dati: **non si tolgono parol
 contenuto**, nemmeno generiche come `study` o `data`, perché è una decisione di analisi,
 non di pulizia — lo stesso principio del layer silver.
 
-**Il filtro `is_reference_like` è attivo per definizione, non per risultato.**
-Sul corpus intero sono 235.914 paragrafi, l'**1,90%**, e per giunta corti — 304 caratteri
-di media contro 785 — quindi pesano solo lo **0,74% del testo**. Sulla fetta su cui è stato
-misurato l'effetto, togliendoli non entra né esce nessuna parola dalla top-30 e cambia lo
-0,45% delle occorrenze. Li scartiamo perché una dichiarazione di conflitto d'interessi non
-è corpo del paper, e perché è gratis. Non perché migliori la classifica.
+**Il filtro `is_reference_like` è stato tolto, dopo averlo misurato.**
+Erano 235.914 paragrafi, l'**1,90%**, e per giunta corti — 304 caratteri di media contro
+785 — quindi pesavano solo lo **0,74% del testo**: togliendo il filtro non entra né esce
+nessuna parola dalla top-20, cambiano solo i conteggi. Costava tre punti nel codice (due
+lettori più un'opzione da riga di comando) per una differenza che non si vede: la regola
+del progetto è che la complessità si paga solo se la misura la giustifica, e qui non la
+giustificava. La colonna resta nel `silver`, disponibile a chi la vuole.
 
 ## Il vincolo distribuito che decide tutto
 
@@ -226,84 +223,89 @@ che `doc_counts` non è esattamente "una riga per (documento, parola)".
 ## Benchmark
 
 Obbligatori per il corso: tempo di esecuzione contro **numero di partizioni** e contro
-**numero di worker**. Girano con `bench_word_count.py`, **un blocco per invocazione**;
-il notebook (§9) ne legge i CSV e fa i grafici. Impalcatura condivisa in `bench.py`.
+**numero di worker**. Sono due. Non ce ne sono altre.
+
+**Un comando, e la campagna gira da sola tutta la notte.**
 
 ```bash
-tmux new -s bench          # la campagna dura ore: non deve morire con la sessione SSH
+tmux new -s bench          # dura ore: non deve morire con la sessione SSH
 source ~/pyvenv/bin/activate && cd ~/MAPD-Project
-for b in A1 A2 A3a A3b A4 A5 A6 D1 D2; do
-  python Giulia/bench_word_count.py $b --input ~/mapd-data/silver/paragraphs
-done
+python Giulia/bench_word_count.py ~/mapd-data/silver/paragraphs 2>&1 | tee ~/bench.log
 ```
 
-| blocco | cosa misura |
-|---|---|
-| `A1` | dove va il tempo: sola lettura / fase Map / job completo |
-| **`A2`** | **tempo vs numero di partizioni** (obbligatorio) |
-| `A3a` | tempo vs strategia di Reduce (`foldby`, `split_out` 1/4/16/64/256), payload `topk` |
-| `A3b` | le stesse strategie **scrivendo il vocabolario** — il payload che ha ucciso il cluster |
-| `A4` | granularità del combiner (L0/L1/L2) su fette crescenti |
-| `A5` | tempo vs volume di dati, a taglia di partizione costante |
-| **`A6`** | **tempo vs numero di worker** (obbligatorio) |
-| `B` | il payload standard sulla forma di cluster data dall'ambiente (processi vs thread) |
-| `D1`/`D2` | run di riferimento sul corpus intero, con e senza sharding del Reduce |
+| in ordine | cosa | perché lì |
+|---|---|---|
+| **1 · report** | 4 pagine HTML con la linea del tempo dei task e la memoria dei worker | costano poco ed è la cosa che si vuole di più: se la notte va storta, sono già in mano |
+| **2 · partizioni** | *obbligatorio*: stessi dati, tagliati in modi diversi | il cluster è pieno, è il blocco che ha più probabilità di riuscire |
+| **3 · worker** | *obbligatorio*: stessi dati, stesso taglio, meno macchine | ogni punto accende il proprio cluster, quindi l'ordine non vincola |
 
-Un blocco per invocazione perché un blocco che muore si porta via solo se stesso e si
-rilancia da solo; ogni misura è **appesa al CSV appena esiste**, quindi una campagna
-interrotta alle 3 di notte conserva quello che aveva.
+Stima sul corpus intero, dai 274 s del run di riferimento: **~4 ore**, cioè metà notte.
+Il margine è voluto: una campagna che riempie esattamente la notte è una campagna che non
+finisce.
 
-### I dettagli che cambiano il significato della misura
+**Prima di lasciarla andare, la prova generale** — la stessa identica campagna sul
+campione, cinque minuti. Serve a scoprire un percorso sbagliato la sera invece che alle
+sette del mattino:
 
-- nello sweep sulle partizioni **i dati restano gli stessi** e cambia solo come sono
-  suddivisi. Misurare fette di corpus crescenti è un'altra domanda, ed è `A5`;
-- il numero di partizioni si controlla **raggruppando i file in lettura**
-  (`read_groups` + `split_evenly`), non con un `repartition` a valle — vedi sotto, «le
-  partizioni che non hai chiesto». E `repartition(partition_size=…)` si impianta sotto un
-  Client distribuito (`PROJECT_CONTEXT.md`, §8.4);
-- **`A6` va per ultimo**: su `SSHCluster` il pool di worker è la lista di host e
-  `scale()` non può risalire. Nella versione precedente non era così, e lo sweep sulle
-  strategie di Reduce finiva misurato su **un worker solo** — proprio il confronto in cui
-  il parallelismo della coda è l'oggetto della misura;
-- `B` ha bisogno di un cluster di forma diversa, quindi è un processo a parte con il
-  proprio ambiente. Attenzione a `CORD19_WORKER_MEMORY_FRACTION`: `worker_options`
-  dimensiona ogni worker come frazione della RAM del **nodo** e non la divide per il
-  numero di worker su quel nodo, quindi due worker per host al default 0,85 crederebbero
-  di possedere 3,5 GB di una macchina da 4 GB.
+```bash
+python Giulia/bench_word_count.py --repeats 1
+```
 
-`bench.measure` ripete ogni misura, chiama `sweep()` **tra** una ripetizione e l'altra
-(mai dentro una regione cronometrata) e non usa `client.restart()`, che sporcherebbe i
-tempi. Conserva tutte le ripetizioni, non solo la media: è la dispersione a dire se una
-differenza è reale. Registra worker, thread e unmanaged del worker peggiore **effettivi**
-al momento della misura — se l'unmanaged cresce linearmente c'è un hotspot di churn nel
-task (`docs/MEMORY_LEAK_REPORT.md`, §7.4) — e conta i worker ripartiti, che è il modo di
-far diventare «3 worker uccisi» un numero invece di un aneddoto.
+### Le scelte che cambiano il significato della misura
 
-**Una configurazione che non completa viene registrata**, con `seconds` vuoto e l'errore,
-e la campagna prosegue. Non è tolleranza ai guasti fine a se stessa: alcuni punti *devono*
-fallire — il combiner L0, il `foldby` su worker da 3,5 GB, poche partizioni molto grosse —
-e «non ha completato» è una riga della tabella, non un buco.
+- **il lavoro cronometrato è quello che si consegna**: Map, Reduce e scrittura del
+  vocabolario. Non la sola `topk`, che è più comoda da misurare — il crash dell'11 agosto
+  stava proprio nella scrittura, cioè nel pezzo che la vecchia versione saltava;
+- **a dati fissi** nello sweep sulle partizioni: cambia solo come sono tagliati. Misurare
+  fette di corpus crescenti è un'altra domanda;
+- **il numero di partizioni si controlla raggruppando i file in lettura**
+  (`read_groups` + `split_evenly`), non con un `repartition` a valle: quello lascerebbe la
+  lettura sempre alla stessa granularità e metterebbe nel cronometro il costo della
+  ricucitura, che dipende da `k`. Vedi sotto, «le partizioni che non hai chiesto»;
+- **il numero di worker non si cambia rimpicciolendo il cluster.** Su `SSHCluster` il pool
+  è la lista di host e `scale()` può solo scendere: obbligherebbe a ricordarsi un ordine
+  di esecuzione, ed è già costato una campagna misurata su un worker solo. Per ogni punto
+  si accende un cluster nuovo con i primi *N* host di `cluster.txt`. Un minuto a punto, e
+  ogni misura parte pulita;
+- **ogni misura è appesa al CSV appena esiste**, e una configurazione che non completa
+  viene registrata (`secondi` vuoto, l'errore accanto) senza fermare la campagna. Non è
+  tolleranza ai guasti fine a sé stessa: il punto più basso della curva sulle partizioni
+  *deve* fallire — 4 partizioni sul corpus intero sono ~2,5 GB di testo in un task solo — e
+  «non ha completato» è una riga della tabella, non un buco;
+- **`performance_report` costa due righe** e dà quello che nessuna curva dà: le fasi nel
+  tempo e la memoria dei worker. Sempre con `mode="inline"`, altrimenti l'HTML scarica
+  BokehJS da un CDN e resta bianco appena lo guardi senza internet — cioè dopo averlo
+  copiato giù dal cluster;
+- il `foldby` si fotografa **su una fetta**: sul corpus intero è già morto una volta, e la
+  coda seriale che il report deve mostrare è strutturale, identica a qualsiasi scala.
 
 Il benchmark va fatto **sul corpus vero**: su una fetta piccola i tempi sono dominati
-dall'overhead di scheduling e più worker risultano più lenti di uno solo.
+dall'overhead di scheduling.
 
 ### Le partizioni che non hai chiesto
 
-Lo script stampa `partitions: 990` su una cartella di **1979 file**, e per un po' abbiamo
-creduto a una copia parziale dei dati. Non lo è: sono 1979 file e 12.445.234 righe, sia in
-locale sia sulla VM. Il 990 è dask.
-
-| passo | partizioni |
-|---|---:|
-| `dd.read_parquet(...)` | 1.979 |
-| `+ filtro is_reference_like` | 1.979 |
-| `+ proiezione a 2 colonne` | 1.979 |
-| **`+ to_bag()`** | **990** |
+Per mesi lo script ha stampato `partitions: 990` su una cartella di **1979 file**, e per un
+po' abbiamo creduto a una copia parziale dei dati. Non lo era: sono 1979 file e 12.445.234
+righe, sia in locale sia sulla VM. Il 990 era dask.
 
 `to_bag` forza `optimize()`, e l'ottimizzatore di dask-expr **fonde le partizioni piccole**
 (mediana 2,6 MB) a due a due. `blocksize` non c'entra: da 4 a 64 MB, con e senza Client
-distribuito, restano sempre 1979 — ogni Parquet del silver ha un solo row-group e niente
-aggrega fra file.
+distribuito, `read_parquet` resta sempre a 1979 — ogni Parquet del silver ha un solo
+row-group e niente aggrega fra file.
+
+**La sorpresa è arrivata togliendo il filtro `is_reference_like`**, che era in mezzo alla
+lettura. Stessi file, stesso `to_bag`, misurato sul corpus intero:
+
+| lettura | partizioni eseguite |
+|---|---:|
+| 3 colonne + filtro booleano + proiezione → `to_bag()` | **990** |
+| 2 colonne → `to_bag()` *(quello che gira oggi)* | **1.979** |
+
+Cioè: **il numero di partizioni non dipende solo dai file, dipende dalla forma della
+query.** Un ramo condizionale in mezzo alla lettura ha cambiato la parallelizzazione di
+tutto il job, e nessuno l'aveva chiesto. Oggi le partizioni tornano 1:1 con i file, il che
+è più prevedibile — ma è un effetto collaterale, non una scelta: se domani rientrasse una
+colonna in più, il numero potrebbe muoversi di nuovo.
 
 Due conseguenze che valgono per tutti e quattro i task:
 

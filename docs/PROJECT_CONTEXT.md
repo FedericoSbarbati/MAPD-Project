@@ -80,8 +80,13 @@ strutturali (unicità di `cord_uid`, integrità referenziale, invariante prefer-
    cui si lanciava. Da lì: configurazione sempre stampata, dimensionamento relativo, path
    risolti sulla radice della repo.
 9. **Cambio di architettura (agosto 2026):** via l'NFS, un cluster per persona, dati
-   replicati su ogni macchina (§5). E presa d'atto che l'impalcatura dei benchmark
-   (`bench.py`) è cresciuta oltre lo scopo del corso: va rifatta (§9).
+   replicati su ogni macchina (§5).
+10. **Benchmark rifatti da zero (2026-08-13).** 948 righe di impalcatura (`bench.py` +
+    `Giulia/bench_word_count.py`) avevano prodotto **zero misure**: tutti i numeri in mano
+    venivano da run di `word_count.py` lanciati a mano. Sostituite da `cluster.py` (accende
+    il cluster e basta) e da una campagna sola che gira una notte senza sorveglianza.
+    Nella stessa sessione, tolti da `word_count.py` la verifica opt-in dell'invariante, il
+    filtro `is_reference_like` e i due Map da esperimento.
 
 ---
 
@@ -389,7 +394,8 @@ o worker da 16 GB.
 1. **La semplicità è un requisito, non un gusto.** Questo è un esercizio universitario da
    discutere all'orale: il codice va **saputo spiegare**, quindi la complessità che non si
    sa giustificare è un difetto e non una raffinatezza. C'è già un precedente costoso:
-   `bench.py` è cresciuto oltre lo scopo del corso e va rifatto per questo motivo.
+   l'impalcatura dei benchmark è cresciuta a 948 righe senza produrre una sola misura, ed
+   è stata buttata e riscritta in ~130 (2026-08-13).
 2. **Non rigenerare i dati.** `data/` sul Mac e `~/mapd-data/silver/` sul cluster sono
    l'output del run di conversione completo, già validato. Per provare la pipeline (se
    proprio serve): `CORD19_SAMPLE=N` → scrive in `data_sample/`.
@@ -406,9 +412,13 @@ o worker da 16 GB.
    lo **shuffle P2P** non riesce a ricostruire la propria spec quando il grafo nasce da
    un Bag (`RuntimeError: P2P … failed during transfer phase`) → forzare
    `dask.config.set({"dataframe.shuffle.method": "tasks"})`.
-6. **Partizioni ≠ file.** `read_parquet` su `silver/paragraphs` restituisce **990
-   partizioni da 1979 file**: l'ottimizzatore aggrega i file piccoli. Non è un dato
-   mancante, ma i due numeri non vanno confusi quando si leggono i benchmark.
+6. **Partizioni ≠ file, e il numero dipende dalla FORMA DELLA QUERY.** Su
+   `silver/paragraphs` (1979 file) il word count leggeva 3 colonne con un filtro booleano
+   in mezzo e girava su **990 partizioni**: l'ottimizzatore aggregava i file piccoli.
+   Tolto il filtro (agosto 2026), la stessa lettura a 2 colonne ne dà **1979**. Non è mai
+   stato un dato mancante — ma non dare per scontato né il numero né che resti stabile se
+   cambi le colonne lette, e leggilo dal `print` dello script prima di interpretare un
+   benchmark. → `Giulia/README.md`, «Le partizioni che non hai chiesto»
 7. **Modello di memoria:** una lista costruita dentro una task NON è spillabile → il picco
    per-task si controlla con la granularità delle partizioni e con le thread, non con le
    soglie di spill. In Dask **Bag**, ogni operazione tipo-groupby (`foldby`,
@@ -440,16 +450,13 @@ del cluster rifatta (un cluster per persona, senza NFS).
 
 **Prossimi passi, in ordine di importanza:**
 
-1. **I benchmark obbligatori** (tempo vs numero di partizioni, tempo vs numero di worker).
-   Senza, l'analisi è considerata incompleta dal corso. **L'impalcatura va rifatta da
-   zero:** `bench.py` e `Giulia/bench_word_count.py` hanno accumulato complessità che il
-   gruppo non è in grado di giustificare all'orale — non vanno estesi né usati come base.
-   Prima si decide la forma della misura, poi si scrive il minimo che serve.
-   Vincoli già noti e misurati: i benchmark si fanno **sul corpus vero** (sul campione una
-   macchina batte quattro, perché a quella scala è tutto overhead); il sweep sulle
-   partizioni usa `repartition(npartitions=k)` su una fetta **fissa** di dati, altrimenti
-   si misura la quantità di dati invece del partizionamento; su `SSHCluster` il numero di
-   worker si può solo ridurre rispetto alla lista di `cluster.txt`.
+1. **Lanciare la campagna di benchmark sul cluster.** Il codice è scritto e collaudato sul
+   campione (`Giulia/bench_word_count.py`, un comando solo, ~4 ore stimate sul corpus
+   intero); manca la notte di esecuzione. Poi il notebook §9 legge il CSV e disegna.
+   Vincoli già noti e misurati: si fa **sul corpus vero** (sul campione i tempi sono
+   dominati dall'overhead); i dati restano fissi e cambia solo `k`, ottenuto raggruppando
+   i file in lettura; il numero di worker si cambia accendendo un cluster nuovo coi primi
+   *N* host di `cluster.txt`, perché su `SSHCluster` `scale()` può solo scendere.
 2. **Task 2.3.2 (paesi e istituti) da riscrivere:** l'unica versione esistente
    (`Giulia/old/scripts/task_2_3_2_affiliation_representation.py`) **non è distribuita** —
    è uno scan in un processo solo. In un esame di calcolo distribuito è il problema più

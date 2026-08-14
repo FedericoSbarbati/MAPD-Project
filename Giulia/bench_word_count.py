@@ -1,39 +1,46 @@
-"""Benchmark campaign for task 2.3.1 - one block per invocation.
+"""Benchmark del task 2.3.1. Un comando, e la campagna gira da sola tutta la notte.
 
-    python Giulia/bench_word_count.py A2 --input ~/mapd-data/silver/paragraphs
+    python Giulia/bench_word_count.py ~/mapd-data/silver/paragraphs
 
-The course requires the benchmarks and grades an analysis without them as incomplete
-(InstructionsAndGuidelines, point 5): execution time against AT LEAST the number of
-dataset partitions and the number of executors. A2 and A6 are those two; everything else
-is ours.
+Il corso considera INCOMPLETA un'analisi senza benchmark, e chiede di studiare come il
+tempo di esecuzione dipende dai parametri del cluster: "at least the number of dataset
+partitions and the number of executors/processing units" (InstructionsAndGuidelines,
+punto 5). Quel "processing units" si legge in due modi - le macchine e i thread - e qui
+si misurano tutti e due.
 
-    A1   phases: read only / Map / whole job          where the time actually goes
-    A2   time vs number of partitions   (MANDATORY)   is there an optimum?
-    A3a  time vs reduce strategy, topk payload        foldby against a sharded groupby
-    A3b  same strategies, writing the vocabulary      the payload that killed the cluster
-    A4   combiner granularity, growing slices         what the Map phase key costs
-    A5   time vs volume of data                       is the algorithm linear?
-    A6   time vs number of workers      (MANDATORY)   speedup and efficiency - RUN LAST
-    B    the standard payload, cluster shape from the environment (processes vs threads)
-    D1   reference run on the WHOLE corpus, with a performance report
-    D2   the same on the whole corpus with foldby, under a timeout
+LA REGOLA CHE REGGE TUTTO IL FILE: una riga del CSV = una misura = un cluster nuovo.
+Costa un minuto a punto, e in cambio:
+  - sparisce il concetto di "blocco", con tutta la contabilita' di quale cluster e'
+    acceso e in che ordine si puo' scalare;
+  - non serve cancellare niente dopo un fallimento: subito dopo il cluster viene
+    distrutto comunque;
+  - ogni punto parte da worker APPENA NATI. Non e' pignoleria: su questo cluster un
+    worker che ha gia' macinato milioni di stringhe trattiene RSS per frammentazione
+    glibc (PROJECT_CONTEXT.md §7, Atto 3). Riusando un cluster per nove punti, l'ultimo
+    girerebbe su worker stanchi e la misura sommerebbe partizionamento e usura.
 
-Why one block per invocation, rather than one script that runs them all: a block that
-dies takes only itself down and is relaunched alone. Every measurement is appended to its
-CSV the moment it exists, so a campaign interrupted at 3 a.m. keeps what it had.
+Il lavoro cronometrato e' ESATTAMENTE quello che `word_count.py` consegna, scrittura del
+vocabolario compresa. Non un sottoinsieme piu' comodo da misurare: il crash dell'11
+agosto stava proprio nella scrittura, cioe' nel pezzo che il vecchio benchmark saltava.
 
-TWO ORDERING RULES, both learned the expensive way:
+**Prova generale prima di lasciarla andare** - serve a scoprire un percorso sbagliato la
+sera invece che alle sette del mattino. Stessa identica campagna, sul campione:
 
-    A6 goes LAST in any cluster session. It scales the cluster DOWN and on an SSHCluster
-    the worker pool is the host list, so it cannot come back up. Running it before A3
-    silently measures the reduce strategies on one worker - which is exactly what the
-    notebook did.
+    python Giulia/bench_word_count.py --out /tmp/bench-prova --timeout 300
 
-    B needs a differently shaped cluster, so it is a separate process with its own
-    environment (CORD19_THREADS_PER_WORKER, CORD19_WORKER_MEMORY_FRACTION, cluster.txt).
+**Calibrazione sul cluster, prima della notte.** Tre misure dello stesso punto: danno la
+dispersione (il rumore) e il numero da cui ricalcolare il budget di tutto il resto.
+
+    python Giulia/bench_word_count.py ~/mapd-data/silver/paragraphs --only riferimento
+
+**E poi, sul serio**, dentro `tmux` e con tutto l'output su un file:
+
+    tmux new -s bench
+    python Giulia/bench_word_count.py ~/mapd-data/silver/paragraphs 2>&1 | tee ~/bench.log
 """
 
 import argparse
+import csv
 import sys
 import time
 from pathlib import Path
@@ -42,366 +49,203 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "Giulia"))
 
+from distributed import performance_report, wait  # noqa: E402
+
 import word_count as wc  # noqa: E402
-from bench import (  # noqa: E402
-    WorkerTracker,
-    dump_worker_logs,
-    get_client,
-    measure,
-)
+from cluster import available_workers, get_client  # noqa: E402
 
-TOP_N = 20
-DEFAULT_INPUT = "data/silver/paragraphs"
-DEFAULT_OUT = "reports/bench"
+DEFAULT_INPUT = "data_sample/silver/paragraphs"   # senza argomenti si prova sul campione
+DEFAULT_OUT = "~/mapd-out/bench"                  # fuori dalla repo: sul cluster e' usa-e-getta
 
-# The slice every sweep is measured on, as a fraction of the corpus. Fixed across the
-# whole campaign so the blocks are comparable with each other, and small enough that the
-# one-worker point of A6 stays under ten minutes. The absolute number of files is NOT
-# hard-coded: the VM printed 990 partitions where the local copy has 1979, and a constant
-# written here would mean a different experiment on the two machines.
-SLICE_FRACTION = 0.20
+# Il partizionamento del PUNTO DI RIFERIMENTO, che e' anche quello a cui girano la curva
+# sui worker e la misura sui thread. Non e' un numero a caso: sul cluster deciso (4 worker
+# da 4 thread) ci sono 16 slot di calcolo, e `split_out=16` mette uno shard del Reduce per
+# slot. A dati fissi k=256 vuol dire ~19 MB di testo per partizione: abbastanza fine da
+# lasciare margine al load balancing, abbastanza grosso da non annegare nello scheduling.
+K_RIFERIMENTO = 256
 
-# Timeout for D2 only, where the point of the measurement is that it does not finish.
-D2_TIMEOUT = 3600
+# I punti della curva sulle partizioni, DAL CENTRO VERSO I BORDI (256 e' il riferimento,
+# gia' misurato tre volte). L'ordine e' una scelta di progetto: i valori bassi sono i piu'
+# lenti e i piu' fragili - k=4 sul corpus intero sono ~2,4 GB di testo in un task solo -
+# quindi stanno in fondo. Se la notte si interrompe, quello che resta in mano e' il minimo
+# della curva con i due rami vicini, cioe' la parte che risponde alla domanda.
+PARTIZIONI = (512, 128, 1024, 64, 1979, 32, 16, 8, 4)
+
+# La misura sui thread: stesso cluster, stesso taglio, cambia solo quanti thread ha ogni
+# worker. Il 4 non c'e' perche' e' gia' il riferimento.
+#
+# IPOTESI, scritta prima di misurare: la fase Map e' `re.findall` + `Counter` in Python
+# puro, che TIENE il GIL (solo pyarrow lo rilascia, e sta nella lettura). Previsione:
+# T(4 thread)/T(1 thread) ~ 0,6, non 0,25. Se si conferma, l'unita' di calcolo utile su
+# questo carico e' il processo e non il thread; se viene smentita, il tempo e' dominato
+# da I/O e decompressione Arrow. In entrambi i casi lo si scopre con due run.
+THREAD = (2, 1)
+
+# Fra la chiusura di un cluster e l'apertura del successivo: la porta 8786 ha bisogno di
+# un attimo per tornare libera. Mai verificato su SSH - la prima campagna lo dira'.
+PAUSA_FRA_CLUSTER = 10
+
+COLONNE = ["curva", "valore", "ripetizione", "secondi", "errore",
+           "partizioni", "split_out", "file", "worker", "thread"]
 
 
 # ----------------------------------------------------------------------------------
-# Building the measured job
+# La campagna: una tabella, non del codice
 # ----------------------------------------------------------------------------------
 
 
-def slice_size(files):
-    """(rows, parquet bytes) of a list of files, from the Parquet footers only.
+def campagna(disponibili):
+    """La notte intera, in una lista. Si legge dall'alto in basso ed e' l'ordine di esecuzione.
 
-    Metadata, so no text is read. `rows` counts the paragraphs BEFORE the
-    `is_reference_like` filter (1.24% of them); it is here to turn seconds into a
-    throughput, not to be an exact corpus statistic.
+    Ogni punto e' IL RIFERIMENTO CON UNA MANOPOLA CAMBIATA - che e' il metodo
+    sperimentale, ed e' il motivo per cui tutta la campagna sta in cinque righe.
+
+    L'ordine dei blocchi non e' casuale:
+      1. `riferimento` per primo: e' il punto in comune ai tre assi (il k=256 della curva
+         partizioni, il "tutti i worker" della curva worker, il thread di default della
+         misura sui thread) e calibra la stima dei tempi di tutto il resto;
+      2. `worker` prima di `partizioni`: costo prevedibile, nessun punto che possa fallire;
+      3. `partizioni` dal centro ai bordi, per il motivo scritto sopra la costante;
+      4. `foldby` per ultimo, ed e' sacrificabile: riproduce sul cluster vero un confronto
+         che oggi esiste solo dal Mac (1.128 s contro 274 s). Se muore per timeout non
+         costa niente; se muore con KilledWorker, quello E' il risultato.
     """
-    import pyarrow.parquet as pq
+    def punto(curva, valore, **cambiato):
+        return {"curva": curva, "valore": valore,
+                "worker": disponibili, "thread": None,
+                "k": K_RIFERIMENTO, "split_out": wc.SPLIT_OUT, "ripetizioni": 1,
+                **cambiato}
 
-    return (
-        sum(pq.ParquetFile(file).metadata.num_rows for file in files),
-        sum(Path(file).stat().st_size for file in files),
-    )
+    punti = [
+        punto("riferimento", disponibili, ripetizioni=3),
+        *[punto("worker",     w, worker=w) for w in range(disponibili - 1, 0, -1)],
+        *[punto("partizioni", k, k=k)      for k in PARTIZIONI],
+        *[punto("thread",     t, thread=t) for t in THREAD],
+        punto("foldby", 0, split_out=0),
+    ]
+    return [dict(p, ripetizione=r) for p in punti for r in range(p["ripetizioni"])]
 
 
-def bag_of(files, partitions=None):
-    """The Bag of (cord_uid, text) for `files`, split into `partitions` partitions.
+# ----------------------------------------------------------------------------------
+# Il cronometro
+# ----------------------------------------------------------------------------------
 
-    Returns (bag, how). One file is the finest grain the grouping reader can reach - a
-    silver Parquet holds a single row group, and a row group cannot be split - so asking
-    for more partitions than files falls back to `repartition`, which splits the
-    already-read partitions. That is a different mechanism and it is recorded as such
-    instead of being hidden in the same column.
+
+def lavoro(files, k, split_out, destinazione):
+    """Costruisce il lavoro da cronometrare. Non calcola niente: restituisce il grafo.
+
+    Stesse funzioni di `word_count.main`, chiamate allo stesso modo: il benchmark misura
+    quello che si consegna, non una versione piu' comoda da cronometrare.
+
+    Cronometriamo la SCRITTURA del vocabolario e non anche la top-N. Non e' uno sconto:
+    la scrittura obbliga a percorrere tutto il Map e tutto il Reduce, e la top-N e' una
+    selezione su un risultato gia' calcolato. Misurato sul campione: 1,77 s la sola
+    scrittura, 1,72 s la scrittura piu' la top-N su un risultato messo da parte. La
+    stessa cosa.
     """
-    if partitions is None or partitions <= len(files):
-        return wc.read_groups(wc.split_evenly(files, partitions or len(files))), "groups"
-    bag = wc.read_groups(wc.split_evenly(files, len(files)))
-    return bag.repartition(npartitions=partitions), "repartition"
-
-
-def topk_payload(bag, split_out=wc.SPLIT_OUT, combiner="document"):
-    """The measured job: the whole Map/Reduce, collecting only the top N.
-
-    `topk` and not the full vocabulary because it keeps the driver out of the measurement
-    while still forcing every partition through both phases - each partition forwards its
-    own top N and nothing prunes the reduce. What it leaves out is measured separately in
-    A3b, and A3b is where we found out that it leaves out the part that crashes.
-    """
-    _, global_counts = wc.word_count(bag, split_out=split_out, combiner=combiner)
-    return lambda: global_counts.topk(TOP_N, key=1).compute()
-
-
-def parquet_payload(bag, split_out, out):
-    """The real job: the whole vocabulary written to Parquet."""
+    bag = wc.read_groups(wc.split_evenly(files, k))
     _, global_counts = wc.word_count(bag, split_out=split_out)
     frame = global_counts.to_dataframe(meta={"word": "string", "count": "int64"})
-    return lambda: frame.to_parquet(
-        out, write_index=False, compression="zstd", overwrite=True
-    )
+    scrittura = frame.to_parquet(destinazione, write_index=False, compression="zstd",
+                                 overwrite=True, compute=False)
+    return [scrittura], bag.npartitions
 
 
-def safe_count(collection, label):
-    """Compute a count, untimed, and survive the configurations that cannot.
+def cronometra(client, collezioni, timeout):
+    """Calcola `collezioni` col cronometro e un tetto di tempo. -> secondi.
 
-    Used for the number of rows LEAVING the Map phase, which is the shuffle volume - the
-    x axis that makes A4 mean something. It is not part of any timed region.
+    SOLLEVA se il calcolo fallisce o sfora: la riga del CSV la scrive chi chiama, che ha
+    gia' un `except` per il cluster che non parte. Un fallimento e' un dato, non una
+    catastrofe - "non ha completato" e' una riga della tabella, non un buco.
+
+    Il tetto esiste per la notte: una configurazione che si impianta non deve prendersi
+    le ore che restano. Non serve cancellare i future: fra un istante il cluster viene
+    spento comunque.
     """
-    started = time.perf_counter()
+    inizio = time.perf_counter()
+    futures = client.compute(collezioni)
+    wait(futures, timeout=timeout)
+    for future in futures:
+        future.result()  # rilancia qui se il calcolo e' morto sul cluster
+    return round(time.perf_counter() - inizio, 1)
+
+
+def stato_cluster(client):
+    """Quanti worker e quanti thread ci sono DAVVERO adesso.
+
+    Non quanti ne avevi chiesti: se durante la misura ne e' morto uno, la riga del CSV
+    deve dirlo, altrimenti fra sei settimane quella misura non e' piu' interpretabile.
+    """
+    workers = client.scheduler_info()["workers"].values()
+    return {"worker": len(workers),
+            "thread": sum(w.get("nthreads", 0) for w in workers)}
+
+
+def misura(p, files, args):
+    """Accende un cluster, cronometra UNA configurazione, lo spegne. -> la riga del CSV.
+
+    Un solo `try/except`, e copre allo stesso modo un cluster che non parte e un calcolo
+    che muore: da fuori sono la stessa cosa, cioe' un punto che non c'e'.
+
+    `performance_report` avvolge il cronometro e non il contrario, cosi' la generazione
+    dell'HTML - che avviene all'uscita dal `with` - resta fuori dalla misura. Ce n'e' uno
+    per OGNI punto, non quattro scelti a priori: costa due secondi, evita di dover
+    indovinare prima quale servira', e porta con se' la memoria di ogni worker nel tempo
+    (scheda System), che e' il motivo per cui quel dato non sta nel CSV.
+
+    `mode="inline"` incorpora BokehJS nella pagina. Senza, l'HTML se lo scarica da
+    cdn.bokeh.org e resta BIANCO ovunque non ci sia internet - per esempio dopo averlo
+    copiato giu' dal cluster, che e' l'unico momento in cui lo guarderai.
+    """
+    client = cluster = None
+    riga = dict(p, file=len(files), partizioni=None, secondi=None, errore="")
+    percorso = args.out / f"report_{p['curva']}_{p['valore']}_{p['ripetizione']}.html"
     try:
-        value = collection.count().compute()
-        print(f"    {label}: {value:,} righe dal Map ({time.perf_counter() - started:.0f} s)")
-        return value
-    except Exception as exception:
-        print(f"    {label}: non calcolabile ({type(exception).__name__})")
-        return None
+        client, cluster = get_client(repo_root=REPO,
+                                     n_workers=p["worker"], n_threads=p["thread"])
+        riga.update(stato_cluster(client))   # appena acceso: la configurazione verificata
+        collezioni, riga["partizioni"] = lavoro(files, p["k"], p["split_out"],
+                                                args.out / "vocabolario")
+        with performance_report(filename=str(percorso), mode="inline"):
+            riga["secondi"] = cronometra(client, collezioni, args.timeout)
+        riga.update(stato_cluster(client))   # a misura finita: se un worker e' morto, si vede qui
+    except Exception as errore:
+        riga["errore"] = f"{type(errore).__name__}: {errore}"[:200]
+    finally:
+        if client is not None:
+            client.close()
+        if cluster is not None:
+            cluster.close()
+        time.sleep(PAUSA_FRA_CLUSTER)
+    return riga
+
+
+def scrivi_riga(percorso, riga):
+    """Appende una misura al CSV. Subito, non alla fine.
+
+    E' la differenza fra perdere una notte e perdere l'ultima misura.
+    """
+    nuovo = not percorso.exists()
+    with open(percorso, "a", newline="") as fh:
+        scrittore = csv.DictWriter(fh, fieldnames=COLONNE, extrasaction="ignore", restval="")
+        if nuovo:
+            scrittore.writeheader()
+        scrittore.writerow(riga)
 
 
 # ----------------------------------------------------------------------------------
-# The blocks
-# ----------------------------------------------------------------------------------
-
-
-def block_a1(ctx):
-    """Where the time goes: reading, the Map phase, the whole job.
-
-    Three nested jobs on the same data, so the differences are the phases. The read-only
-    point matters more here than on a laptop: every byte comes from one NFS server
-    (PROJECT_CONTEXT.md, section 5), and if it dominates then none of the other curves are
-    about computation.
-    """
-    bag, _ = bag_of(ctx.files)
-    doc_counts, _ = wc.word_count(bag)
-    phases = {
-        "read": lambda: bag.count().compute(),
-        "map": lambda: doc_counts.count().compute(),
-        "full": topk_payload(bag),
-    }
-    for phase, payload in phases.items():
-        ctx.measure(payload, phase=phase, partitions=bag.npartitions)
-
-
-def block_a2(ctx):
-    """MANDATORY: time against the number of partitions, on a FIXED slice of data.
-
-    The data does not change, only how it is cut. Measuring larger and larger slices - what
-    the first version of this benchmark did - answers a different question, and that one is
-    A5. At fixed data, "number of partitions" IS "partition size".
-
-    The bottom of the range is expected to fail on 3.5 GB workers: a sixteenth of the
-    partitions means sixteen times the peak per task. That is the result, not a gap in the
-    table - too few partitions is not slower, it is infeasible.
-    """
-    base = len(ctx.files)
-    for k in (base // 16, base // 8, base // 4, base // 2, base, base * 2, base * 4):
-        bag, how = bag_of(ctx.files, k)
-        ctx.measure(topk_payload(bag), partitions=bag.npartitions, partition_control=how)
-
-
-def block_a3a(ctx):
-    """Time against where the Reduce ends up. Same result, same data, same cluster.
-
-    `split_out=0` is `Bag.foldby`, which collapses into ONE partition; the others shard the
-    groupby over N. `split_out=1` is the point that makes the comparison readable: it also
-    ends in a single output partition, so foldby-against-1 isolates "Python dict against
-    Arrow" and 1-against-16 isolates "serial tail against parallel tail". Without it the
-    two effects are read as one number.
-    """
-    bag, _ = bag_of(ctx.files)
-    for split_out in (0, 1, 4, 16, 64, 256):
-        ctx.measure(
-            topk_payload(bag, split_out=split_out),
-            partitions=bag.npartitions, split_out=split_out, payload="topk",
-        )
-
-
-def block_a3b(ctx):
-    """The same strategies, but writing the whole vocabulary - the job we actually ship.
-
-    This is the controlled reproduction of the crash of 2026-08-11: on the full corpus,
-    with foldby, the run died in `KilledWorker` on task
-    ('foldby-b-to_dataframe-...', 0) while writing the Parquet, AFTER the topk of the line
-    above had gone through. So the two payloads do not merely differ in seconds, they
-    differ in whether the job exists at all - and the single foldby partition breaks when
-    it has to become a pandas DataFrame of millions of tuples, not when it reduces.
-    """
-    bag, _ = bag_of(ctx.files)
-    for split_out in (0, 16):
-        out = ctx.out / f"vocabulary_split{split_out}"
-        ctx.measure(
-            parquet_payload(bag, split_out, out),
-            partitions=bag.npartitions, split_out=split_out, payload="parquet",
-        )
-
-
-def block_a4(ctx):
-    """The combiner ladder, against growing slices: what the Map phase key costs.
-
-    L0 sends one record per OCCURRENCE, L1 one per (document, word) - the assignment's own
-    formulation - and L2 one per (partition, word). Measured against growing slices rather
-    than at one size because the interesting quantity is not the ratio of the times, it is
-    where each rung stops completing: the combiner does not only save time, it moves the
-    frontier of what runs at all. `map_rows` is the shuffle volume, and it is what the
-    times should be read against.
-    """
-    base = len(ctx.files)
-    for n_files in (max(2, base // 40), max(4, base // 16), max(8, base // 8), base // 4):
-        files = ctx.files[:n_files]
-        rows, nbytes = slice_size(files)
-        for combiner in ("none", "document", "partition"):
-            bag, _ = bag_of(files)
-            doc_counts, _ = wc.word_count(bag, combiner=combiner)
-            print(f"  {combiner} su {n_files} file")
-            ctx.measure(
-                topk_payload(bag, combiner=combiner),
-                partitions=bag.npartitions, combiner=combiner, files=n_files,
-                rows=rows, parquet_bytes=nbytes,
-                map_rows=safe_count(doc_counts, f"{combiner}/{n_files}"),
-            )
-
-
-def block_a5(ctx):
-    """Time against the volume of data, at CONSTANT partition size.
-
-    One partition per file at every point, so the partitions stay the same size and only
-    how many there are changes. Together with A2 this separates the two things the old
-    benchmark measured at once.
-    """
-    base = len(ctx.files)
-    for n_files in (base // 8, base // 4, base // 2, base, min(base * 2, len(ctx.all_files))):
-        files = ctx.all_files[:n_files]
-        rows, nbytes = slice_size(files)
-        bag, _ = bag_of(files)
-        ctx.measure(
-            topk_payload(bag), partitions=bag.npartitions, files=n_files,
-            rows=rows, parquet_bytes=nbytes,
-        )
-
-
-def block_a6(ctx):
-    """MANDATORY: time against the number of workers. ALWAYS THE LAST BLOCK OF A SESSION.
-
-    Fixed partitioning, fixed data: only how much machine is working changes. The sweep
-    goes DOWNWARDS because on an SSHCluster the worker pool is the host list and `scale`
-    cannot add hosts that are not in it.
-    """
-    from bench import scale
-
-    if ctx.cluster is None:
-        raise SystemExit("A6 ha bisogno di un cluster ridimensionabile, non di un "
-                         "Client attaccato a uno scheduler altrui (DASK_SCHEDULER).")
-    bag, _ = bag_of(ctx.files)
-    workers = len(ctx.client.scheduler_info()["workers"])
-    for n_workers in range(workers, 0, -1):
-        scale(ctx.client, ctx.cluster, n_workers)
-        ctx.measure(topk_payload(bag), partitions=bag.npartitions, requested_workers=n_workers)
-
-
-def block_b(ctx):
-    """The standard payload on whatever shape the environment built. Processes vs threads.
-
-    The block itself is trivial; the experiment is in how the cluster was created, and
-    `cluster_state` records the workers and threads that really turned up:
-
-        B1  CORD19_THREADS_PER_WORKER=1                        4 workers x 1 thread
-        B2  the block A configuration                          4 workers x 2 threads
-        B3  each IP twice in cluster.txt, FRACTION=0.40        8 workers x 1 thread
-
-    B1 against B2 is the cleanest question we can ask this code: same cluster, same memory,
-    twice the threads. The tokenizer is `re.findall` plus `Counter`, pure Python, and the
-    GIL is not released by either - so if the two times coincide, the second core of each
-    node is producing nothing. B2 against B3 then asks the same 8 cores to work as
-    processes instead of threads.
-
-    The memory fraction is not a detail in B3: `worker_options` sizes each worker as a
-    share of the NODE's RAM and does not divide it by the number of workers on that node,
-    so two workers per host at the default 0.85 would each believe they own 3.5 GB of a
-    4 GB machine.
-    """
-    bag, _ = bag_of(ctx.files)
-    ctx.measure(topk_payload(bag), partitions=bag.npartitions, shape=ctx.args.label or "?")
-
-
-def block_d1(ctx):
-    """Reference run on the WHOLE corpus, once, with a performance report.
-
-    Not repeated: this is not a point on a curve, it is the number to quote and the task
-    stream to show. The Bokeh report is where the shape of the job is visible at a glance -
-    the reduce tail above all - and it is the artefact for the presentation.
-    """
-    from distributed import performance_report
-
-    files = ctx.all_files
-    rows, nbytes = slice_size(files)
-    bag, _ = bag_of(files)
-    with performance_report(filename=str(ctx.out / "d1_full_corpus.html")):
-        ctx.measure(
-            topk_payload(bag), repeats=1, partitions=bag.npartitions,
-            files=len(files), rows=rows, parquet_bytes=nbytes, split_out=wc.SPLIT_OUT,
-        )
-    print("written:", ctx.out / "d1_full_corpus.html")
-
-
-def block_d2(ctx):
-    """The whole corpus with foldby, under a timeout. Expected to fail; run it last.
-
-    On the Mac at 3.4 GB per worker this finished in 1762 s having lost 3 workers on the
-    way. On the cluster, at 3.5 GB, it did not finish at all. The measurement exists to
-    turn that traceback into a bounded statement - "it did not complete in N minutes on
-    four real nodes" - with the worker logs to say who killed them. It goes last precisely
-    because whatever it does, nothing is waiting behind it.
-    """
-    from distributed import wait
-
-    files = ctx.all_files
-    rows, nbytes = slice_size(files)
-    bag, _ = bag_of(files)
-    _, global_counts = wc.word_count(bag, split_out=0)
-
-    def run():
-        future = ctx.client.compute(global_counts.topk(TOP_N, key=1))
-        try:
-            wait([future], timeout=D2_TIMEOUT)
-        except Exception:
-            ctx.client.cancel(future)
-            raise TimeoutError(f"non completato in {D2_TIMEOUT} s")
-        return future.result()
-
-    ctx.measure(run, repeats=1, partitions=bag.npartitions, files=len(files),
-                rows=rows, parquet_bytes=nbytes, split_out=0)
-
-
-BLOCKS = {
-    "A1": block_a1, "A2": block_a2, "A3a": block_a3a, "A3b": block_a3b,
-    "A4": block_a4, "A5": block_a5, "A6": block_a6,
-    "B": block_b, "D1": block_d1, "D2": block_d2,
-}
-
-
-# ----------------------------------------------------------------------------------
-# Driver
-# ----------------------------------------------------------------------------------
-
-
-class Context:
-    """What every block needs, and the one place the common columns are filled in."""
-
-    def __init__(self, args, client, cluster, all_files, files, out, csv_path):
-        self.args, self.client, self.cluster = args, client, cluster
-        self.all_files, self.files = all_files, files
-        self.out, self.csv_path = out, csv_path
-        self.tracker = WorkerTracker(client)
-        self.rows, self.parquet_bytes = slice_size(files)
-        self.records = []
-
-    # `payload` and `repeats` are positional-only: everything else becomes a CSV column,
-    # and a block that wants a column literally called "payload" (A3a and A3b do) must not
-    # collide with the parameter carrying the job.
-    def measure(self, payload, /, repeats=None, **columns):
-        """Time one configuration, with the slice's size attached to every record.
-
-        Rows and bytes travel with the measurement so the CSV is self-describing: a table
-        of seconds alone cannot be turned into a throughput six weeks later, and the blocks
-        that vary the volume would have no x axis at all.
-        """
-        defaults = {"block": self.args.block, "files": len(self.files),
-                    "rows": self.rows, "parquet_bytes": self.parquet_bytes}
-        self.records += measure(
-            payload, self.client,
-            repeats=self.args.repeats if repeats is None else repeats,
-            out=self.csv_path, tracker=self.tracker, **{**defaults, **columns},
-        )
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("block", choices=sorted(BLOCKS), help="which block to run")
-    parser.add_argument("--input", default=DEFAULT_INPUT, help=f"silver/paragraphs (default {DEFAULT_INPUT})")
-    parser.add_argument("--out", default=DEFAULT_OUT, help=f"output directory (default {DEFAULT_OUT})")
-    parser.add_argument("--repeats", type=int, default=3, help="repetitions per configuration")
-    parser.add_argument("--slice-files", type=int, help="files in the benchmark slice "
-                                                        f"(default: {SLICE_FRACTION:.0%} of the corpus)")
-    parser.add_argument("--label", help="a name for this cluster shape, recorded in block B")
+    parser.add_argument("input", nargs="?", default=DEFAULT_INPUT,
+                        help=f"silver/paragraphs (default {DEFAULT_INPUT}, il campione)")
+    parser.add_argument("--out", default=DEFAULT_OUT, help=f"dove scrivere (default {DEFAULT_OUT})")
+    parser.add_argument("--timeout", type=int, default=3600,
+                        help="tetto in secondi per una singola misura (default 3600)")
+    parser.add_argument("--only", nargs="+", metavar="CURVA",
+                        help="rilancia solo queste curve: riferimento worker partizioni "
+                             "thread foldby (default: tutte, nell'ordine della campagna)")
     return parser.parse_args()
 
 
@@ -410,41 +254,45 @@ def main():
 
     source = Path(args.input).expanduser()
     source = source if source.is_absolute() else REPO / source
-    out = Path(args.out).expanduser()
-    out = out if out.is_absolute() else REPO / out
-    if not source.exists():
-        raise SystemExit(f"Input non trovato: {source}")
-    out.mkdir(parents=True, exist_ok=True)
+    args.out = Path(args.out).expanduser()
+    args.out = args.out if args.out.is_absolute() else REPO / args.out
+    args.out.mkdir(parents=True, exist_ok=True)
+    args.csv = args.out / "misure.csv"
 
-    all_files = wc.paragraph_files(source)
-    if not all_files:
+    files = wc.paragraph_files(source)
+    if not files:
         raise SystemExit(f"Nessun file .parquet in {source}")
-    n_slice = args.slice_files or max(1, round(len(all_files) * SLICE_FRACTION))
-    files = all_files[:min(n_slice, len(all_files))]
 
-    client, cluster = get_client(repo_root=REPO)
-    csv_path = out / f"{args.block}.csv"
-    print(f"blocco    : {args.block}")
-    print(f"input     : {source}  ({len(all_files)} file)")
-    print(f"fetta     : {len(files)} file ({len(files) / len(all_files):.1%} del corpus)")
-    print(f"ripetizioni: {args.repeats}")
-    print(f"csv       : {csv_path}  (append)")
+    lista = campagna(available_workers(REPO))
+    if args.only:
+        lista = [p for p in lista if p["curva"] in args.only]
+    if not lista:
+        raise SystemExit(f"--only {args.only} non seleziona nessuna misura")
 
-    context = Context(args, client, cluster, all_files, files, out, csv_path)
-    print(f"paragrafi : {context.rows:,} righe, {context.parquet_bytes / 1e6:.0f} MB di Parquet")
-    try:
-        BLOCKS[args.block](context)
-    finally:
-        # The logs are the only place that says WHY a worker died, and they have to be
-        # taken before the cluster goes away.
-        dump_worker_logs(client, out / f"{args.block}_workers.log")
-        client.close()
-        if cluster is not None:
-            cluster.close()
+    print(f"input   : {source}  ({len(files)} file)")
+    print(f"output  : {args.out}")
+    print(f"csv     : {args.csv}  (in append)")
+    print(f"tetto   : {args.timeout} s per misura")
+    # La campagna si stampa PRIMA di eseguirla. E' la regola "niente fallback silenziosi"
+    # applicata alla campagna stessa: quello che sta per succedere si legge in venti
+    # secondi, e Ctrl-C e' li'.
+    print(f"\n{len(lista)} misure, quindi {len(lista)} cluster, in quest'ordine:")
+    for n, p in enumerate(lista, 1):
+        print(f"  {n:>2}. {p['curva']:<11} valore={p['valore']:<5} worker={p['worker']} "
+              f"thread={p['thread'] or 'default'} k={p['k']} split_out={p['split_out']} "
+              f"rip={p['ripetizione']}")
 
-    done = [r for r in context.records if r.get("seconds") is not None]
-    print(f"\nblocco {args.block}: {len(done)}/{len(context.records)} misure completate")
-    print("written:", csv_path)
+    inizio = time.perf_counter()
+    for n, p in enumerate(lista, 1):
+        print(f"\n[{n}/{len(lista)}] {p['curva']}={p['valore']} rip={p['ripetizione']}")
+        riga = misura(p, files, args)
+        scrivi_riga(args.csv, riga)
+        print("   ->", f"{riga['secondi']} s  ({riga['partizioni']} partizioni, "
+                       f"{riga['worker']} worker, {riga['thread']} thread in tutto)"
+              if riga["secondi"] is not None else f"FALLITO  {riga['errore']}")
+
+    print(f"\ncampagna finita in {(time.perf_counter() - inizio) / 60:.0f} minuti")
+    print("csv:", args.csv)
 
 
 if __name__ == "__main__":
