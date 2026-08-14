@@ -438,6 +438,35 @@ o worker da 16 GB.
     della stessa taglia; la prima è solo scheduler; le VM **non** si cancellano a fine
     sessione (i risultati stanno sui loro dischi) ma i risultati si scaricano;
     `scripts/cluster_storage_up.sh` appartiene all'architettura NFS e non si lancia più.
+12. **Quello che gira su `LocalCluster` non gira necessariamente su `SSHCluster`**, e sono
+    due trappole che il Mac non può mostrare — trovate il 2026-08-14, entrambe verificate.
+    Valgono per tutti e quattro i task.
+
+    **a) Il codice deve viaggiare col grafo.** Dask serializza con cloudpickle, che manda
+    **per valore** le funzioni definite nel file che lanci (`__main__`) e **per
+    riferimento** quelle importate da un modulo. Il riferimento funziona solo se il modulo
+    è importabile anche dove il grafo viene riaperto: in locale sì, su `SSHCluster` no —
+    scheduler e worker nascono via SSH dalla home, senza il repo nel `sys.path`. Il
+    sintomo manda a cercare nel posto sbagliato:
+
+    ```
+    RuntimeError: Error during deserialization of the task graph. This frequently
+    occurs if the Scheduler and Client have different environments.
+    ```
+
+    Non sono gli ambienti: sotto c'è un `ModuleNotFoundError`. Cura: `cluster.py` →
+    `serializza_per_valore(modulo)`. Chi lancia un `.py` che **importa** le proprie
+    funzioni (il benchmark, il notebook) deve chiamarla; chi le definisce nel file che
+    lancia (`word_count.py`) no — ed è per questo che il word count girava e il benchmark
+    no.
+
+    **b) Le cartelle di output esistono solo dove le hai create.** `to_parquet` fa
+    `mkdirs` **sul client**, ma a scrivere sono i worker, ognuno sul proprio disco. fsspec
+    apre in scrittura con `auto_mkdir=False`, quindi il primo task muore con
+    `FileNotFoundError` su ogni macchina che non ha quella cartella. Cura:
+    `client.run(os.makedirs, percorso, exist_ok=True)` dopo aver acceso il cluster.
+    Corollario da ricordare: **l'output finisce sparso sui dischi dei worker**, e la
+    cartella sulla macchina scheduler resta vuota, perché lì non gira nessun worker.
 
 ---
 
@@ -450,13 +479,16 @@ del cluster rifatta (un cluster per persona, senza NFS).
 
 **Prossimi passi, in ordine di importanza:**
 
-1. **Lanciare la campagna di benchmark sul cluster.** Il codice è scritto e collaudato sul
-   campione (`Giulia/bench_word_count.py`, un comando solo, ~4 ore stimate sul corpus
-   intero); manca la notte di esecuzione. Poi il notebook §9 legge il CSV e disegna.
-   Vincoli già noti e misurati: si fa **sul corpus vero** (sul campione i tempi sono
-   dominati dall'overhead); i dati restano fissi e cambia solo `k`, ottenuto raggruppando
-   i file in lettura; il numero di worker si cambia accendendo un cluster nuovo coi primi
-   *N* host di `cluster.txt`, perché su `SSHCluster` `scale()` può solo scendere.
+1. **Calibrare, poi lanciare la campagna di benchmark.** Il codice è scritto e collaudato
+   end-to-end sul campione (`Giulia/bench_word_count.py`: 18 misure, un comando solo);
+   il notebook §9 legge il CSV e disegna. Il passo che **non va saltato** è la
+   calibrazione — `--only riferimento`, tre misure dello stesso punto, ~30 minuti — perché
+   la stima di ~4,5 ore per la notte intera viene da **un solo dato del Mac** moltiplicato
+   per un fattore per-core indovinato, e può sbagliare del doppio. Quelle tre accensioni
+   di fila verificano anche i tre rischi noti: la porta 8786 che si libera fra un cluster
+   e il successivo, i worker orfani, e **dove finisce il vocabolario** (lo scrivono i
+   worker sui propri dischi: la cartella sulla macchina scheduler resterà vuota).
+   Il disegno della campagna e il perché di ogni scelta stanno in `DECISIONI.md`.
 2. **Task 2.3.2 (paesi e istituti) da riscrivere:** l'unica versione esistente
    (`Giulia/old/scripts/task_2_3_2_affiliation_representation.py`) **non è distribuita** —
    è uno scan in un processo solo. In un esame di calcolo distribuito è il problema più

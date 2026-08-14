@@ -141,10 +141,29 @@ riscrivi qui.
   batte quattro, perché a quella scala il tempo è tutto overhead di coordinamento.
   → `local/NOTES.md` v5
 - **Le curve obbligatorie sono DUE** — tempo vs numero di partizioni, tempo vs numero di
-  worker — e non ce ne sono altre. Tutto il resto è un run che si fa una volta e di cui si
-  scrive il numero. *Rifatti da zero il 2026-08-13: `bench.py` (497 righe) è diventato
-  `cluster.py`, che accende il cluster e basta; `Giulia/bench_word_count.py` (451 righe,
-  dieci blocchi) è una campagna sola da ~130 righe.*
+  worker. Il testo però dice «at least», e «executors/**processing units**» si legge anche
+  come *thread*: si aggiunge quindi **una misura secca sui thread per worker** (tre punti,
+  non una curva) e **una riga sola** per il `foldby` sul cluster vero. Niente altro.
+  *Rifatti da zero il 2026-08-13, riscritti il 2026-08-14.*
+- **Il cluster dei benchmark è 5 × `cloudveneto.large`** (1 scheduler + 4 worker da 4 vCPU
+  e 8 GB). 4 core danno tre punti alla misura sui thread; 8 GB fanno completare anche il
+  punto più estremo della curva sulle partizioni. → `SETUP_CLOUDVENETO.md` §6
+- **Una riga del CSV = una misura = un cluster nuovo.** Non è pignoleria: un worker che ha
+  già macinato milioni di stringhe trattiene RSS per frammentazione glibc, quindi riusando
+  un cluster per nove punti l'ultimo misurerebbe partizionamento **più** usura.
+  → `PROJECT_CONTEXT.md` §7 Atto 3
+- **Tutte le misure sono ancorate a un unico punto di riferimento** (tutti i worker,
+  `k=256`, `split_out=16`, thread di default), **ripetuto 3 volte**. Il rumore si misura
+  una volta sola invece di pagarlo su ogni punto: altrove basta una ripetizione. Quel
+  punto appartiene a tutte le curve, quindi nei grafici l'asse x si legge dalle colonne di
+  stato (`partizioni`, `worker`, `thread`) e non dalla colonna `valore`.
+- **L'ordine della campagna è progettato per una notte che può interrompersi:**
+  riferimento → worker → partizioni **dal centro verso i bordi** → thread → foldby. I
+  punti bassi di `k` sono i più lenti e i più fragili e stanno in fondo, così quello che
+  resta in mano è il minimo della curva con i due rami vicini.
+- **La campagna non si lancia mai senza averla prima calibrata** (`--only riferimento`,
+  ~30 min): le stime dei tempi vengono da un solo dato del Mac e possono sbagliare del
+  doppio.
 - **Lo sweep sulle partizioni tiene i dati fissi**, e `k` si ottiene **raggruppando i file
   in lettura**, non con un `repartition` a valle: quello lascerebbe la lettura sempre alla
   stessa granularità e metterebbe nel cronometro il costo della ricucitura. Fette di corpus
@@ -221,3 +240,62 @@ che la porta 8786 si liberi fra un cluster e il successivo (pausa 10 s, non prov
 SSH) · misurato: `word_count.py` calcolava tutto **due volte**, risolto con `persist()` ·
 partizioni passate da 990 a 1979 togliendo il filtro — dipendono dalla forma della query ·
 2.3.2 ancora non distribuito.
+
+---
+## 2026-08-14 (sera) — il disegno della campagna, e il codice che lo esegue
+
+**Decisioni + perché**
+Letti i flavor veri dalla dashboard: **medium = 2 core, large = 4, xlarge = 8** (chiude la
+domanda aperta in `SETUP` §6). Scelto **5 × `cloudveneto.large`**: 4 core danno tre punti
+alla misura sui thread, 8 GB fanno completare anche `k=4`. Il testo del corso dice «at
+least», e «processing units» si legge anche come *thread*: aggiunta una **misura secca sui
+thread** con l'ipotesi scritta prima di misurare (Map = regex + Counter in Python puro →
+tiene il GIL → `T(4)/T(1) ≈ 0,6`, non `0,25`), più **una riga** per il `foldby` sul cluster
+vero. Ripetizioni: **3 su un solo punto di riferimento** per misurare il rumore una volta,
+1 altrove. Ordine progettato per una notte interrompibile: riferimento → worker →
+partizioni **dal centro ai bordi** → thread → foldby. Regola nuova che semplifica e
+insieme corregge: **una riga del CSV = un cluster nuovo** (via i "blocchi", via
+`client.cancel`, e ogni punto parte da worker non frammentati).
+
+**Collegamenti toccati**
+`Giulia/bench_word_count.py` riscritto (183 → **107 righe di codice**): la campagna è una
+tabella di cinque righe, ogni punto è "il riferimento con una manopola cambiata"; un
+`performance_report` per **ogni** misura, che è il motivo per cui il picco di memoria non
+sta nel CSV ← `cluster.py` (+`n_threads`, simmetrico a `n_workers`; **e finalmente
+tracciato da git: non lo era**) → CSV in `~/mapd-out/bench/` → `word_count.ipynb` §9,
+riscritto e portato a cinque sezioni. `SETUP` §6 (tabella dei flavor) e §5 (via la regola
+"bench in revisione") allineati.
+
+**Trovato riallineando il notebook:** il punto di riferimento è etichettato
+`curva="riferimento"`, quindi filtrare su `curva=="partizioni"` faceva **sparire da
+entrambe le curve obbligatorie il loro punto migliore e le uniche barre d'errore**. I
+grafici ora si costruiscono come "le righe della curva più il riferimento", con l'asse x
+letto dalle colonne di stato.
+
+**Thread aperti**
+Calibrare sul cluster (`--only riferimento`) prima della notte · la scrittura del
+vocabolario finisce sui dischi dei **worker**: la cartella sulla macchina scheduler
+resterà vuota, e `SETUP` §3 dice ancora di scaricare i risultati da una macchina sola ·
+disco delle VM locale o di rete? · se l'ipotesi sul GIL regge, il seguito naturale è un
+worker per core (IP ripetuto in `cluster.txt`).
+
+**Primo tentativo sul cluster: 3 misure su 3 fallite, e il cluster era perfetto**
+(4 worker, 16 thread, 7,1 GB ciascuno — la configurazione voluta). Due trappole che
+`LocalCluster` **non può** mostrare, entrambe riprodotte e verificate in locale:
+
+1. **Il codice non viaggiava col grafo.** cloudpickle manda per valore le funzioni di
+   `__main__` e per *riferimento* quelle importate da un modulo; lo scheduler, che nasce
+   via SSH dalla home, non ha il repo nel `sys.path` e non riesce a riaprire il grafo. Il
+   messaggio (*«Scheduler and Client have different environments»*) manda a cercare
+   versioni diverse: sotto c'era un `ModuleNotFoundError`. **Spiega anche perché non era
+   mai emerso**: `word_count.py` lanciato a mano ha le sue funzioni in `__main__`, quindi
+   gira; il benchmark le importa, quindi no. → `cluster.serializza_per_valore`
+2. **Le cartelle di output non esistono sui worker.** `to_parquet` fa `mkdirs` sul client,
+   ma scrivono i worker sui propri dischi, e fsspec apre con `auto_mkdir=False`: sarebbe
+   stato il `FileNotFoundError` successivo. → `client.run(os.makedirs, ...)`
+
+Le due regole stanno in `PROJECT_CONTEXT.md` §8.12 perché **valgono per tutti e quattro i
+task**. Lezione di metodo: la prova generale sul campione ha validato la logica ma non
+poteva validare la *distribuzione*, perché in locale client, scheduler e worker
+condividono `sys.path` e file system. Non c'è modo di scoprirle prima del cluster — c'è
+solo il modo di riconoscerle in due minuti invece che in una notte.

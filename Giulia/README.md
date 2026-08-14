@@ -222,33 +222,40 @@ che `doc_counts` non è esattamente "una riga per (documento, parola)".
 
 ## Benchmark
 
-Obbligatori per il corso: tempo di esecuzione contro **numero di partizioni** e contro
-**numero di worker**. Sono due. Non ce ne sono altre.
+Obbligatorie per il corso: tempo di esecuzione contro **numero di partizioni** e contro
+**numero di executor/processing unit**. Il testo dice «at least», e «processing units» si
+legge sia come *macchine* sia come *thread*: si misurano entrambi. In tutto **18 misure**.
 
-**Un comando, e la campagna gira da sola tutta la notte.**
+**Un comando, e la campagna gira da sola tutta la notte.** Ma prima si calibra.
 
 ```bash
+# 1. calibrazione, ~30 min: 3 misure dello stesso punto
+python Giulia/bench_word_count.py ~/mapd-data/silver/paragraphs --only riferimento
+
+# 2. la notte, ~4,5 h
 tmux new -s bench          # dura ore: non deve morire con la sessione SSH
-source ~/pyvenv/bin/activate && cd ~/MAPD-Project
 python Giulia/bench_word_count.py ~/mapd-data/silver/paragraphs 2>&1 | tee ~/bench.log
 ```
 
+La calibrazione non è un lusso: la stima delle 4,5 ore viene da **un solo dato del Mac**
+(274 s) moltiplicato per un fattore per-core indovinato, e può sbagliare del doppio. E tre
+accensioni di fila verificano i tre rischi noti — la porta 8786, i worker orfani, e dove
+finiscono i file scritti.
+
 | in ordine | cosa | perché lì |
 |---|---|---|
-| **1 · report** | 4 pagine HTML con la linea del tempo dei task e la memoria dei worker | costano poco ed è la cosa che si vuole di più: se la notte va storta, sono già in mano |
-| **2 · partizioni** | *obbligatorio*: stessi dati, tagliati in modi diversi | il cluster è pieno, è il blocco che ha più probabilità di riuscire |
-| **3 · worker** | *obbligatorio*: stessi dati, stesso taglio, meno macchine | ogni punto accende il proprio cluster, quindi l'ordine non vincola |
-
-Stima sul corpus intero, dai 274 s del run di riferimento: **~4 ore**, cioè metà notte.
-Il margine è voluto: una campagna che riempie esattamente la notte è una campagna che non
-finisce.
+| **1 · riferimento** ×3 | tutti i worker, `k=256`, `split_out=16` | è il punto **in comune ai tre assi**, e le sue 3 ripetizioni misurano il rumore una volta sola invece di pagarlo su ogni punto |
+| **2 · worker** | *obbligatorio*: stessi dati, stesso taglio, meno macchine | costo prevedibile, nessun punto può fallire |
+| **3 · partizioni** | *obbligatorio*: stessi dati, tagliati in modi diversi | dal centro ai bordi: la coda è sacrificabile |
+| **4 · thread** | l'altra lettura di «processing units» | due punti, a valle di quelli obbligatori |
+| **5 · foldby** | `split_out=0` sul cluster vero | ultimo apposta: se non completa, *quello* è il risultato |
 
 **Prima di lasciarla andare, la prova generale** — la stessa identica campagna sul
-campione, cinque minuti. Serve a scoprire un percorso sbagliato la sera invece che alle
+campione, quattro minuti. Serve a scoprire un percorso sbagliato la sera invece che alle
 sette del mattino:
 
 ```bash
-python Giulia/bench_word_count.py --repeats 1
+python Giulia/bench_word_count.py --out /tmp/bench-prova --timeout 300
 ```
 
 ### Le scelte che cambiano il significato della misura
@@ -262,22 +269,24 @@ python Giulia/bench_word_count.py --repeats 1
   (`read_groups` + `split_evenly`), non con un `repartition` a valle: quello lascerebbe la
   lettura sempre alla stessa granularità e metterebbe nel cronometro il costo della
   ricucitura, che dipende da `k`. Vedi sotto, «le partizioni che non hai chiesto»;
-- **il numero di worker non si cambia rimpicciolendo il cluster.** Su `SSHCluster` il pool
-  è la lista di host e `scale()` può solo scendere: obbligherebbe a ricordarsi un ordine
-  di esecuzione, ed è già costato una campagna misurata su un worker solo. Per ogni punto
-  si accende un cluster nuovo con i primi *N* host di `cluster.txt`. Un minuto a punto, e
-  ogni misura parte pulita;
+- **una riga del CSV = una misura = un cluster nuovo.** Costa un minuto a punto, e non è
+  pignoleria: un worker che ha già macinato milioni di stringhe trattiene RSS per
+  frammentazione dell'allocatore (`PROJECT_CONTEXT.md` §7), quindi riusando un cluster per
+  nove punti l'ultimo misurerebbe il partizionamento **più l'usura**. Come effetto
+  collaterale sparisce anche il problema di `SSHCluster`, dove `scale()` può solo scendere
+  e obbligherebbe a ricordarsi un ordine di esecuzione;
+- **il rumore si misura una volta sola**: 3 ripetizioni sul punto di riferimento, 1
+  altrove. La dispersione di quel punto è la scala con cui si giudicano tutte le
+  differenze dei grafici — due punti che distano meno di quella barra non sono diversi;
 - **ogni misura è appesa al CSV appena esiste**, e una configurazione che non completa
   viene registrata (`secondi` vuoto, l'errore accanto) senza fermare la campagna. Non è
-  tolleranza ai guasti fine a sé stessa: il punto più basso della curva sulle partizioni
-  *deve* fallire — 4 partizioni sul corpus intero sono ~2,5 GB di testo in un task solo — e
-  «non ha completato» è una riga della tabella, non un buco;
-- **`performance_report` costa due righe** e dà quello che nessuna curva dà: le fasi nel
-  tempo e la memoria dei worker. Sempre con `mode="inline"`, altrimenti l'HTML scarica
-  BokehJS da un CDN e resta bianco appena lo guardi senza internet — cioè dopo averlo
-  copiato giù dal cluster;
-- il `foldby` si fotografa **su una fetta**: sul corpus intero è già morto una volta, e la
-  coda seriale che il report deve mostrare è strutturale, identica a qualsiasi scala.
+  tolleranza ai guasti fine a sé stessa: «non ha completato» è una riga della tabella, non
+  un buco — ed è il risultato che ci si aspetta dal `foldby`;
+- **un `performance_report` per OGNI misura**, non quattro scelti in anticipo: costa due
+  secondi e dà quello che nessuna curva dà (la linea del tempo dei task e la memoria di
+  ogni worker). È il motivo per cui il picco di memoria **non sta nel CSV**: è già lì.
+  Sempre con `mode="inline"`, altrimenti l'HTML scarica BokehJS da un CDN e resta bianco
+  appena lo guardi senza internet — cioè dopo averlo copiato giù dal cluster.
 
 Il benchmark va fatto **sul corpus vero**: su una fetta piccola i tempi sono dominati
 dall'overhead di scheduling.

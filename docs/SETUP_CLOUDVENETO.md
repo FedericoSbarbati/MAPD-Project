@@ -254,16 +254,43 @@ personale di qualcuno.
 - **Niente Docker**, né sulle VM né sul Mac: il cluster è reale.
 - **`scripts/cluster_storage_up.sh` non si lancia più.** Montava il volume ed esportava
   l'NFS: appartiene all'architettura vecchia.
-- **`bench.py` e `Giulia/bench_word_count.py` sono in revisione: non costruirci sopra.**
-  Hanno accumulato complessità che il gruppo non è in grado di giustificare all'orale e
-  verranno rifatti da zero. Fino ad allora non vanno estesi.
+- **Mai lanciare la campagna di benchmark senza averla prima calibrata**
+  (`--only riferimento`, ~30 minuti). Le stime dei tempi vengono da un solo dato del Mac.
 
 ---
 
-## 6 · Da verificare / domande aperte
+## 6 · I flavor, e cosa scegliere
 
-- **Quanti core ha ogni flavor?** La guida del corso non lo dice; si legge dalla dashboard
-  al momento della creazione. Serve per dimensionare i benchmark e per spiegare le curve.
+**Letti dalla dashboard il 2026-08-14** — chiude una domanda che era aperta da mesi. Sono
+i flavor pubblici, cioè quelli che possiamo davvero creare:
+
+| flavor | vCPU | RAM | RAM/core | disco |
+|---|---:|---:|---:|---:|
+| `cloudveneto.xlarge` | 8 | 16 GB | 2,0 | 25 GB |
+| `cloudveneto.8cores8GB25GB` | 8 | 8 GB | 1,0 | 25 GB |
+| **`cloudveneto.large`** | **4** | **8 GB** | **2,0** | 25 GB |
+| `cloudveneto.medium` | 2 | 4 GB | 2,0 | 25 GB |
+| `cloudveneto.1core4GB25GB` | 1 | 4 GB | 4,0 | 25 GB |
+
+Esistono anche `cloudveneto.30cores180GB…`, `…15cores90GB…` (con GPU) e
+`cloudveneto.16cores4GB25GB`, ma sono **`Pubblico: No`**: non li abbiamo.
+
+**Scelta per i benchmark del word count: 5 × `cloudveneto.large`** → 1 scheduler + 4
+worker da 4 vCPU / 8 GB (quota: 20 vCPU, 40 GB). Il perché sta in `DECISIONI.md`; in due
+righe: 4 core danno tre punti allo sweep sui thread, e 8 GB fanno completare anche il
+punto più estremo della curva sulle partizioni invece di lasciarci un buco.
+
+> **Il core in più non è velocità in più, su questo carico.** `SSHCluster` accende **un
+> worker per host**, quindi 8 core diventano *un processo con 8 thread* — e la fase Map
+> del word count è Python puro che tiene il GIL. Prendere `xlarge` invece di `large`
+> raddoppia la quota consumata senza raddoppiare niente. È l'ipotesi che il benchmark
+> §9.3 misura; per usare davvero tutti i core servirebbe un worker per core, cioè
+> ripetere l'IP in `cluster.txt`.
+
+### Ancora da verificare
+
+- **Il disco delle VM è locale o un volume di rete?** Decide quanto pesa la lettura di
+  ~5 GB di Parquet nei tempi dei benchmark. Si scopre alla prima misura di calibrazione.
 - **Se un giorno il `silver/` cambia**, va rifatta l'immagine snapshot: le macchine
   create da un'immagine vecchia continuerebbero a leggere dati vecchi **senza dare nessun
   errore**. Oggi non è un problema — i dati attuali sono quelli validati e definitivi.

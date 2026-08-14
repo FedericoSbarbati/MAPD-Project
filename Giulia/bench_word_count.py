@@ -41,6 +41,7 @@ dispersione (il rumore) e il numero da cui ricalcolare il budget di tutto il res
 
 import argparse
 import csv
+import os
 import sys
 import time
 from pathlib import Path
@@ -52,7 +53,16 @@ sys.path.insert(0, str(REPO / "Giulia"))
 from distributed import performance_report, wait  # noqa: E402
 
 import word_count as wc  # noqa: E402
-from cluster import available_workers, get_client  # noqa: E402
+from cluster import available_workers, get_client, serializza_per_valore  # noqa: E402
+
+# OBBLIGATORIO, e non e' un dettaglio: qui `word_count` e' IMPORTATO, non definito. Senza
+# questa riga cloudpickle mette nel grafo il *nome* delle sue funzioni invece del codice,
+# e su `SSHCluster` lo scheduler - che nasce via SSH dalla home, senza il repo nel
+# sys.path - non riesce a riaprire il grafo. Muore con "Error during deserialization of
+# the task graph ... different environments", che manda a cercare nel posto sbagliato.
+# `python Giulia/word_count.py` non ha il problema perche' li' le funzioni stanno in
+# `__main__`, che cloudpickle spedisce gia' per valore. -> cluster.serializza_per_valore
+serializza_per_valore(wc)
 
 DEFAULT_INPUT = "data_sample/silver/paragraphs"   # senza argomenti si prova sul campione
 DEFAULT_OUT = "~/mapd-out/bench"                  # fuori dalla repo: sul cluster e' usa-e-getta
@@ -200,12 +210,21 @@ def misura(p, files, args):
     client = cluster = None
     riga = dict(p, file=len(files), partizioni=None, secondi=None, errore="")
     percorso = args.out / f"report_{p['curva']}_{p['valore']}_{p['ripetizione']}.html"
+    vocabolario = args.out / "vocabolario"
     try:
         client, cluster = get_client(repo_root=REPO,
                                      n_workers=p["worker"], n_threads=p["thread"])
         riga.update(stato_cluster(client))   # appena acceso: la configurazione verificata
-        collezioni, riga["partizioni"] = lavoro(files, p["k"], p["split_out"],
-                                                args.out / "vocabolario")
+
+        # Il vocabolario lo scrivono I WORKER, ognuno sul proprio disco, e `to_parquet`
+        # crea la cartella solo qui sul client. Senza questa riga il primo task di
+        # scrittura muore con FileNotFoundError su ogni macchina che non ce l'ha: fsspec
+        # apre in scrittura con `auto_mkdir=False` e non crea le cartelle mancanti.
+        # E' anche il motivo per cui la cartella sulla macchina scheduler resta VUOTA a
+        # fine run: li' non gira nessun worker.
+        client.run(os.makedirs, str(vocabolario), exist_ok=True)
+
+        collezioni, riga["partizioni"] = lavoro(files, p["k"], p["split_out"], vocabolario)
         with performance_report(filename=str(percorso), mode="inline"):
             riga["secondi"] = cronometra(client, collezioni, args.timeout)
         riga.update(stato_cluster(client))   # a misura finita: se un worker e' morto, si vede qui
