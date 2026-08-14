@@ -98,7 +98,7 @@ COLONNE = ["curva", "valore", "ripetizione", "secondi", "errore",
 # ----------------------------------------------------------------------------------
 
 
-def campagna(disponibili):
+def campagna(disponibili, thread=None):
     """La notte intera, in una lista. Si legge dall'alto in basso ed e' l'ordine di esecuzione.
 
     Ogni punto e' IL RIFERIMENTO CON UNA MANOPOLA CAMBIATA - che e' il metodo
@@ -116,7 +116,7 @@ def campagna(disponibili):
     """
     def punto(curva, valore, **cambiato):
         return {"curva": curva, "valore": valore,
-                "worker": disponibili, "thread": None,
+                "worker": disponibili, "thread": thread,
                 "k": K_RIFERIMENTO, "split_out": wc.SPLIT_OUT, "ripetizioni": 1,
                 **cambiato}
 
@@ -270,6 +270,13 @@ def parse_args():
     parser.add_argument("--only", nargs="+", metavar="CURVA",
                         help="rilancia solo queste curve: riferimento worker partizioni "
                              "thread foldby (default: tutte, nell'ordine della campagna)")
+    parser.add_argument("--thread", type=int, metavar="N",
+                        help="thread per worker per TUTTA la campagna (default: quanti "
+                             "core ha il nodo). Serve a rifare la curva sulle partizioni "
+                             "con meno thread: un thread in meno e' un quarto di memoria "
+                             "per worker, quindi il muro dei KilledWorker si sposta. "
+                             "La curva `thread` ignora questa opzione, che e' la sua "
+                             "variabile")
     return parser.parse_args()
 
 
@@ -287,7 +294,7 @@ def main():
     if not files:
         raise SystemExit(f"Nessun file .parquet in {source}")
 
-    lista = campagna(available_workers(REPO))
+    lista = campagna(available_workers(REPO), thread=args.thread)
     if args.only:
         lista = [p for p in lista if p["curva"] in args.only]
     if not lista:

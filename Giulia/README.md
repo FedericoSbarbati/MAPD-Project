@@ -8,6 +8,7 @@ raccomandata dal testo: «we recommend utilizing the RDD/Bag data structure»).
 | `word_count.py` | l'implementazione: funzioni pure + un `main()` per lanciarla da terminale |
 | `word_count.ipynb` | il notebook, che **importa** il modulo — nessun codice duplicato, nessun sottoprocesso |
 | `bench_word_count.py` | la campagna di benchmark: **un comando, e gira da sola** — vedi sotto |
+| `misura_ram.py` | quanta RAM occupa **un** task e in quale passo se ne va. Niente cluster: un processo solo. Spiega perché metà della curva sulle partizioni non completa |
 
 Dipendenze condivise col resto del progetto: `cluster.py` alla root, che accende il
 cluster e stampa com'è fatto. Nessun ambiente Python separato: si usa quello del progetto
@@ -257,6 +258,46 @@ sette del mattino:
 ```bash
 python Giulia/bench_word_count.py --out /tmp/bench-prova --timeout 300
 ```
+
+### I risultati, sul cluster vero (5 × `cloudveneto.large`, 4 worker da 4 core e 7,1 GB)
+
+Riferimento: `k=256`, `split_out=16`, cluster pieno → **497,6 s**, dispersione **1,4%** su
+tre ripetizioni. È la scala con cui si giudica ogni altra differenza.
+
+| misura | risultato |
+|---|---|
+| **worker** | speedup 2,74× su 4 worker, efficienza da 0,81 a 0,69, frazione seriale ~15–24% |
+| **partizioni** | minimo a `k=512` (490 s, 32 partizioni per slot), +9,6% a `k=1979`. **Sotto `k=128` non completa** |
+| **thread** | 379,8 s a **1** thread per worker contro 497,6 s a 4: **i thread rallentano del 31%** |
+| **foldby** | 1.091 s contro 498, cioè 2,2× — e stavolta completa |
+
+Il risultato che non ci aspettavamo è il terzo: `4 worker × 1 thread` usa **4 core su 16**
+e batte del 24% la configurazione che li usa tutti. Il perché sta in `misura_ram.py`.
+
+### Perché metà della curva sulle partizioni non completa
+
+Non è un buco: è un confine, e ha un numero.
+
+```bash
+python Giulia/misura_ram.py ~/mapd-data/silver/paragraphs    # nessun cluster, ~5 minuti
+```
+
+| k | testo | coppie Map | picco 1 task | ×4 thread | esito |
+|---:|---:|---:|---:|---:|---|
+| 512 | 0,03 GB | 834 k | 0,50 GB | 2,0 GB | ok |
+| 256 | 0,06 GB | 1,81 M | 1,00 GB | 4,0 GB | ok |
+| 128 | 0,12 GB | 3,75 M | 1,94 GB | 7,8 GB | ok, sul filo (tetto 7,1) |
+| 64 | 0,29 GB | 7,93 M | 4,07 GB | 16,3 GB | `KilledWorker` |
+
+Due numeri da ricordare, entrambi stabili a ogni scala:
+
+- **~230 byte per ogni coppia** `((cord_uid, parola), conteggio)` — il costo dell'oggetto
+  Python, non del dato;
+- il picco di un task è **~15× il testo** che sta elaborando.
+
+Da cui: **un thread non è solo un'unità di calcolo, è un moltiplicatore di memoria.** Con
+`--thread 1` il muro si sposta di 4× e `k=64` diventa raggiungibile; `k=32` no, su
+nessun flavor pubblico.
 
 ### Le scelte che cambiano il significato della misura
 

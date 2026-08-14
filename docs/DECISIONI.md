@@ -310,3 +310,49 @@ condividono `sys.path` e file system. Non serve però il cluster per provarla �
 partire scheduler e worker da una cartella fuori dal repo e collegarsi con
 `DASK_SCHEDULER` (ricetta in `PROJECT_CONTEXT.md` §8.12c). Dieci secondi, e riproduce
 entrambe le trappole. Trovata dopo aver bruciato due tentativi sul cluster vero.
+
+---
+## 2026-08-14 (notte) — la campagna è girata, e il risultato non è quello previsto
+
+**I numeri.** Riferimento `k=256`, cluster pieno: **497,6 s con dispersione 1,4%** su tre
+ripetizioni — il metodo «rumore misurato una volta, poi una ripetizione» regge, e quella
+barra è la scala di tutto il resto. Campagna completa in 128 minuti, 10 misure su 15.
+
+- **worker** (obbligatoria, completa): speedup 2,74× su 4, efficienza 0,81 → 0,69;
+- **partizioni** (obbligatoria, 5 punti su 10): minimo a `k=512`, +9,6% a `k=1979`,
+  **e sotto `k=128` non completa**;
+- **thread**: `T(4 thread)/T(1 thread) = 1,31`. Avevo previsto 0,60.
+
+**Il risultato che ribalta un'assunzione.** I thread non danno poco: **fanno male**.
+`4 worker × 1 thread` = 379,8 s usando 4 core su 16, contro 497,6 s usando tutti e 16.
+E `1 worker × 4 thread` (1.365,7 s) contro `4 worker × 1 thread` (379,8 s) sono **3,6×** a
+parità di thread nominali. Su questo carico l'unità di calcolo utile è **il processo**.
+
+**Il perché, misurato e non ipotizzato** → `Giulia/misura_ram.py` (nuovo: esegue una sola
+partizione fuori dal cluster e misura la RSS passo per passo). Il picco di un task è
+**~15× il testo** che elabora, e la fase Map da sola vale il 44% con **~230 byte per
+coppia `((cord_uid, parola), conteggio)`** — costo dell'oggetto Python, stabile a ogni
+scala, campione compreso. Quindi **un thread è un moltiplicatore di memoria**: a `k=64`
+servono 4,07 GB per task, ×4 thread = 16,3 GB contro un tetto di 7,1.
+
+**Regola nuova: il ramo sinistro della curva sulle partizioni è un confine, non un buco.**
+Sotto `k=128` il job non è eseguibile su questo hardware, e nemmeno un flavor da 16 GB
+sposterebbe il limite di più di un punto. Si riporta come risultato misurato.
+
+**Errore mio da non ripetere:** avevo previsto che `k=4` sarebbe passato, calcolando il
+**testo in ingresso** per partizione invece dell'**uscita del Map**, che è ciò che riempie
+il worker. E la prima analisi del fallimento l'ho data come fatto quando era
+un'interpolazione fra due punti: Federico ha chiesto la misura, ed è stata la cosa giusta.
+
+**Collegamenti toccati**
+`Giulia/misura_ram.py` (nuovo) · `bench_word_count.py` (+`--thread N`, per rifare una
+curva con meno thread e spostare il muro) · `word_count.ipynb` §9.1/§9.2/§9.3 riscritte:
+le curve ora si costruiscono filtrando sullo **stato reale** (`worker`, `thread`,
+`partizioni`) e non sull'etichetta `curva`, altrimenti due campagne a thread diversi
+verrebbero **mediate insieme** · `Giulia/README.md` con i risultati.
+
+**Thread aperti**
+Rifare la curva sulle partizioni con `--thread 1` (~40 min: recupera `k=64` e la misura
+nella configurazione migliore) · quanto del rallentamento dei thread è GIL e quanto è
+pressione di memoria non è separato dai dati attuali · il seguito naturale è **un worker
+per core** (IP ripetuto in `cluster.txt`), mai approvato · scaricare `~/mapd-out` dalla VM.
