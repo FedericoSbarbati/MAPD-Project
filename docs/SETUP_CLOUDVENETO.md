@@ -154,13 +154,21 @@ da cui lanci, e nella home.
 concreto: senza volume condiviso, i risultati stanno sui dischi delle macchine, quindi
 distruggerle vuol dire buttare via il lavoro. Si lasciano accese.
 
-**Scarica comunque i risultati sul portatile.** Sono piccoli (un CSV, un grafico, e il
-Parquet del vocabolario: qualche decina di megabyte) e finché stanno su una sola macchina
-sono a rischio:
+**Scarica comunque i risultati sul portatile.** Finché stanno su una sola macchina sono a
+rischio. **`-i` con la chiave privata serve**: senza, `scp` non prova nemmeno quella giusta
+e risponde `Permission denied (publickey)` — è già successo.
 
 ```bash
-scp -J UTENTE_CV@gate.cloudveneto.it -r ubuntu@10.67.22.XYZ:~/mapd-out ./
+scp -J UTENTE_CV@gate.cloudveneto.it -i ~/.ssh/id_ed25519 -r \
+    ubuntu@10.67.22.XYZ:'~/mapd-out/*' ~/mapd-out/
 ```
+
+**L'indirizzo è quello della macchina da cui hai LANCIATO**, cioè la prima riga di
+`cluster.txt`: CSV, log e report HTML li scrive il processo client, che gira lì. Il
+**Parquet del vocabolario no**: quello lo scrivono i worker, ognuno sul proprio disco, e
+sulla macchina scheduler la cartella resta vuota. Se ti serve anche quello, va preso da un
+worker — ma per i benchmark non serve: la scrittura conta come lavoro cronometrato, il suo
+contenuto è già stato validato.
 
 > **Tensione da tenere presente, e da decidere insieme nel gruppo.** La guida del corso
 > raccomanda esplicitamente di essere parsimoniosi perché il pool di risorse è condiviso
@@ -276,16 +284,25 @@ Esistono anche `cloudveneto.30cores180GB…`, `…15cores90GB…` (con GPU) e
 `cloudveneto.16cores4GB25GB`, ma sono **`Pubblico: No`**: non li abbiamo.
 
 **Scelta per i benchmark del word count: 5 × `cloudveneto.large`** → 1 scheduler + 4
-worker da 4 vCPU / 8 GB (quota: 20 vCPU, 40 GB). Il perché sta in `DECISIONI.md`; in due
-righe: 4 core danno tre punti allo sweep sui thread, e 8 GB fanno completare anche il
-punto più estremo della curva sulle partizioni invece di lasciarci un buco.
+worker da 4 vCPU / 8 GB (quota: 20 vCPU, 40 GB). Il perché sta in `DECISIONI.md`; in una
+riga: 4 core danno tre punti allo sweep sui thread.
 
-> **Il core in più non è velocità in più, su questo carico.** `SSHCluster` accende **un
-> worker per host**, quindi 8 core diventano *un processo con 8 thread* — e la fase Map
-> del word count è Python puro che tiene il GIL. Prendere `xlarge` invece di `large`
-> raddoppia la quota consumata senza raddoppiare niente. È l'ipotesi che il benchmark
-> §9.3 misura; per usare davvero tutti i core servirebbe un worker per core, cioè
-> ripetere l'IP in `cluster.txt`.
+> **Gli 8 GB NON bastano al ramo basso della curva sulle partizioni.** *Corretto il
+> 2026-08-15: qui c'era scritto il contrario.* Sotto `k=128` il job non è eseguibile, e non
+> è un'opinione: il picco di un task è ~15 volte il testo che elabora — 4,07 GB a `k=64`,
+> che moltiplicati per 4 thread fanno 16,3 GB contro un tetto di 7,1 (`Giulia/misura_ram.py`).
+> È un **confine misurato**, si riporta come risultato; un flavor da 16 GB lo sposterebbe
+> di un punto solo.
+
+> **Il core in più non è velocità in più, su questo carico — misurato, non più ipotesi.**
+> `SSHCluster` accende **un worker per host**, quindi 8 core diventano *un processo con 8
+> thread*, e la fase Map del word count è Python puro che tiene il GIL. La campagna del
+> 2026-08-14 lo dice più forte di quanto fosse stato previsto: `T(4 thread)/T(1 thread) =
+> 1,31` (previsto 0,60), cioè i thread **rallentano**; e `1 worker × 4 thread` impiega
+> 1365,7 s contro i 379,8 s di `4 worker × 1 thread`, 3,6 volte tanto a parità di thread
+> nominali. Prendere `xlarge` invece di `large` raddoppia la quota consumata senza
+> raddoppiare niente. Per usare davvero tutti i core servirebbe un worker per core, cioè
+> ripetere l'IP in `cluster.txt` — **mai provato**.
 
 ### Ancora da verificare
 

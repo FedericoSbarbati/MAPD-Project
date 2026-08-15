@@ -146,8 +146,12 @@ riscrivi qui.
   non una curva) e **una riga sola** per il `foldby` sul cluster vero. Niente altro.
   *Rifatti da zero il 2026-08-13, riscritti il 2026-08-14.*
 - **Il cluster dei benchmark è 5 × `cloudveneto.large`** (1 scheduler + 4 worker da 4 vCPU
-  e 8 GB). 4 core danno tre punti alla misura sui thread; 8 GB fanno completare anche il
-  punto più estremo della curva sulle partizioni. → `SETUP_CLOUDVENETO.md` §6
+  e 8 GB). 4 core danno tre punti alla misura sui thread. **Gli 8 GB NON bastano al ramo
+  basso della curva sulle partizioni:** sotto `k=128` il job non è eseguibile, perché il
+  picco di un task è ~15× il testo che elabora (4,07 GB a `k=64`, ×4 thread = 16,3 GB
+  contro un tetto di 7,1). È un confine misurato, si riporta come risultato.
+  *Misurato il 2026-08-14, sostituisce «8 GB fanno completare anche il punto più estremo».*
+  → `Giulia/misura_ram.py`, `SETUP_CLOUDVENETO.md` §6
 - **Una riga del CSV = una misura = un cluster nuovo.** Non è pignoleria: un worker che ha
   già macinato milioni di stringhe trattiene RSS per frammentazione glibc, quindi riusando
   un cluster per nove punti l'ultimo misurerebbe partizionamento **più** usura.
@@ -356,3 +360,29 @@ Rifare la curva sulle partizioni con `--thread 1` (~40 min: recupera `k=64` e la
 nella configurazione migliore) · quanto del rallentamento dei thread è GIL e quanto è
 pressione di memoria non è separato dai dati attuali · il seguito naturale è **un worker
 per core** (IP ripetuto in `cluster.txt`), mai approvato · scaricare `~/mapd-out` dalla VM.
+
+---
+## 2026-08-14
+
+**Decisioni + perché**
+Campagna girata sul cluster: **i thread RALLENTANO** (`T(4)/T(1) = 1,31`, previsto 0,60) →
+su questo carico l'unità di calcolo utile è **il processo**, non il thread; il perché è
+misurato e non ipotizzato (`misura_ram.py`: ~230 B per coppia Map, picco = ~15× il testo,
+quindi un thread è un **moltiplicatore di memoria**). Sotto `k=128` il job non è eseguibile
+su 8 GB: **confine misurato, non buco** — *sostituita in Parte A* la riga che dava gli 8 GB
+per sufficienti al punto estremo. Il codice va **spedito ai nodi** (`client.upload_file`):
+i dati sono replicati su ogni macchina, il codice no, ed è ciò che ha bruciato due run.
+
+**Collegamenti toccati**
+`misura_ram.py` (nuovo, un processo per `k`) → `memoria.csv` · `bench_word_count.py`
+(+`--thread N`) → `misure.csv` → `word_count.ipynb` §9, che ora costruisce le curve dallo
+**stato reale** (`worker`/`thread`/`partizioni`) e non dall'etichetta `curva`, altrimenti
+due campagne a thread diversi verrebbero mediate insieme · `cluster.py` finalmente
+tracciato da git · `PROJECT_CONTEXT.md` §8.12 (trappole `SSHCluster` + banco di prova
+locale con `DASK_SCHEDULER`) · `Giulia/README.md` coi risultati.
+
+**Thread aperti**
+Curva partizioni con `--thread 1` (previsione scritta: `k=64` passa, `k=32` no) · `SETUP`
+§6 contiene ancora l'affermazione falsificata sugli 8 GB · GIL vs pressione di memoria non
+separati dai dati attuali · un worker per core (IP ripetuti in `cluster.txt`) mai approvato
+· scaricare `~/mapd-out` dalla VM · errore mio da non ripetere: previsioni date per fatti.
