@@ -36,7 +36,17 @@ dispersione (il rumore) e il numero da cui ricalcolare il budget di tutto il res
 **E poi, sul serio**, dentro `tmux` e con tutto l'output su un file:
 
     tmux new -s bench
-    python Giulia/bench_word_count.py ~/mapd-data/silver/paragraphs 2>&1 | tee ~/bench.log
+    python Giulia/bench_word_count.py ~/mapd-data/silver/paragraphs \
+        --thread 1 --ripetizioni 3 2>&1 | tee ~/bench.log
+
+`--thread 1` perche' e' la configurazione che i benchmark hanno SELEZIONATO: i thread
+rallentano a ogni k provato (+24% ... +31%), quindi la campagna definitiva gira dove il
+codice va meglio. `--ripetizioni 3` sono tre passate intere della campagna, non tre misure
+di fila dello stesso punto - il perche' sta in `campagna`.
+
+Ogni riga porta anche il **picco di RAM dei worker** (`picco_gb`, `picco_medio_gb`), preso
+con lo stesso strumento di `Giulia/misura_ram.py` e senza campionare niente: vedi
+`picco_memoria`.
 """
 
 import argparse
@@ -76,21 +86,28 @@ K_RIFERIMENTO = 256
 PARTIZIONI = (512, 128, 1024, 64, 1979, 32, 16, 8, 4)
 
 # La misura sui thread: stesso cluster, stesso taglio, cambia solo quanti thread ha ogni
-# worker. Il 4 non c'e' perche' e' gia' il riferimento.
+# worker. Quello uguale al riferimento viene tolto da `campagna`, per non misurarlo due
+# volte con due nomi diversi.
 #
-# IPOTESI, scritta prima di misurare: la fase Map e' `re.findall` + `Counter` in Python
-# puro, che TIENE il GIL (solo pyarrow lo rilascia, e sta nella lettura). Previsione:
-# T(4 thread)/T(1 thread) ~ 0,6, non 0,25. Se si conferma, l'unita' di calcolo utile su
-# questo carico e' il processo e non il thread; se viene smentita, il tempo e' dominato
-# da I/O e decompressione Arrow. In entrambi i casi lo si scopre con due run.
-THREAD = (2, 1)
+# L'IPOTESI scritta prima di misurare era: la fase Map e' `re.findall` + `Counter` in
+# Python puro, che TIENE il GIL (solo pyarrow lo rilascia, e sta nella lettura), quindi
+# T(4 thread)/T(1 thread) ~ 0,6 invece di 0,25.
+#
+# MISURATA il 2026-08-14, e smentita nel verso peggiore: **1,31**. I thread non e' che
+# non scalano, peggiorano - e non solo al riferimento, ma a ogni k provato (+24% ... +31%).
+# Restano due spiegazioni possibili che questi dati NON separano: la contesa sul GIL e la
+# pressione di memoria (quattro thread si dividono lo stesso tetto del worker, quindi ogni
+# task ha un quarto del budget). Le separa la configurazione "un worker per core", che ha
+# lo stesso budget per task dei 4 thread ma un GIL a testa - vedi il README.
+THREAD = (4, 2, 1)
 
 # Fra la chiusura di un cluster e l'apertura del successivo: la porta 8786 ha bisogno di
 # un attimo per tornare libera. Mai verificato su SSH - la prima campagna lo dira'.
 PAUSA_FRA_CLUSTER = 10
 
 COLONNE = ["curva", "valore", "ripetizione", "secondi", "errore",
-           "partizioni", "split_out", "file", "worker", "thread"]
+           "partizioni", "split_out", "file", "worker", "thread",
+           "picco_gb", "picco_medio_gb"]
 
 
 # ----------------------------------------------------------------------------------
@@ -98,8 +115,8 @@ COLONNE = ["curva", "valore", "ripetizione", "secondi", "errore",
 # ----------------------------------------------------------------------------------
 
 
-def campagna(disponibili, thread=None):
-    """La notte intera, in una lista. Si legge dall'alto in basso ed e' l'ordine di esecuzione.
+def campagna(disponibili, thread=None, ripetizioni=1):
+    """La giornata intera, in una lista. Si legge dall'alto in basso ed e' l'ordine di esecuzione.
 
     Ogni punto e' IL RIFERIMENTO CON UNA MANOPOLA CAMBIATA - che e' il metodo
     sperimentale, ed e' il motivo per cui tutta la campagna sta in cinque righe.
@@ -108,26 +125,35 @@ def campagna(disponibili, thread=None):
       1. `riferimento` per primo: e' il punto in comune ai tre assi (il k=256 della curva
          partizioni, il "tutti i worker" della curva worker, il thread di default della
          misura sui thread) e calibra la stima dei tempi di tutto il resto;
-      2. `worker` prima di `partizioni`: costo prevedibile, nessun punto che possa fallire;
-      3. `partizioni` dal centro ai bordi, per il motivo scritto sopra la costante;
-      4. `foldby` per ultimo, ed e' sacrificabile: riproduce sul cluster vero un confronto
-         che oggi esiste solo dal Mac (1.128 s contro 274 s). Se muore per timeout non
-         costa niente; se muore con KilledWorker, quello E' il risultato.
+      2. `partizioni` prima di `worker`, e dal centro ai bordi: e' la curva col minimo, e
+         il punto con un worker solo costa da solo mezz'ora;
+      3. `worker`, che e' l'altra curva obbligatoria;
+      4. `foldby` per ultimo, ed e' sacrificabile: se muore per timeout non costa niente;
+         se muore con KilledWorker, quello E' il risultato.
+
+    LE RIPETIZIONI SONO PASSATE INTERE, non misure consecutive dello stesso punto. Costa
+    uguale e dice di piu': fra due ripetizioni dello stesso punto passano ore, quindi la
+    dispersione che si misura include la variabilita' della macchina nella giornata - il
+    vicino di rack che si sveglia, la cache del disco che cambia stato - e non solo quella
+    di due run attaccati. E se la giornata si interrompe, quello che resta in mano e'
+    UNA CAMPAGNA COMPLETA invece di meta' curva misurata tre volte.
     """
     def punto(curva, valore, **cambiato):
         return {"curva": curva, "valore": valore,
                 "worker": disponibili, "thread": thread,
-                "k": K_RIFERIMENTO, "split_out": wc.SPLIT_OUT, "ripetizioni": 1,
+                "k": K_RIFERIMENTO, "split_out": wc.SPLIT_OUT,
                 **cambiato}
 
     punti = [
-        punto("riferimento", disponibili, ripetizioni=3),
-        *[punto("worker",     w, worker=w) for w in range(disponibili - 1, 0, -1)],
+        punto("riferimento", disponibili),
         *[punto("partizioni", k, k=k)      for k in PARTIZIONI],
-        *[punto("thread",     t, thread=t) for t in THREAD],
+        *[punto("worker",     w, worker=w) for w in range(disponibili - 1, 0, -1)],
+        # Il valore uguale a quello della campagna e' gia' il riferimento: misurarlo di
+        # nuovo con un altro nome sporcherebbe le curve costruite sullo stato reale.
+        *[punto("thread",     t, thread=t) for t in THREAD if t != thread],
         punto("foldby", 0, split_out=0),
     ]
-    return [dict(p, ripetizione=r) for p in punti for r in range(p["ripetizioni"])]
+    return [dict(p, ripetizione=r) for r in range(ripetizioni) for p in punti]
 
 
 # ----------------------------------------------------------------------------------
@@ -172,6 +198,41 @@ def cronometra(client, collezioni, timeout):
     for future in futures:
         future.result()  # rilancia qui se il calcolo e' morto sul cluster
     return round(time.perf_counter() - inizio, 1)
+
+
+def picco_memoria(client):
+    """Quanta RAM ha toccato al massimo OGNI worker durante questa misura. -> GB.
+
+    Nessun campionamento e nessun processo di guardia: `ru_maxrss` e' il massimo storico
+    di RSS del processo, e siccome ogni misura accende un cluster NUOVO, il massimo
+    storico di quel processo E' il picco di questa misura. La regola "un cluster per
+    riga" si ripaga anche qui.
+
+    E' lo stesso strumento di `Giulia/misura_ram.py`, di proposito: quello misura il picco
+    di UN task in isolamento, questo il picco del worker che ne fa girare `nthreads`
+    insieme. Confrontarli e' il modo per vedere se i thread si sommano davvero.
+
+    Il valore comprende l'interprete e le librerie del worker (~0,2 GB), quindi non e'
+    esattamente il costo dei dati: e' quello che la nanny guarda per decidere se
+    ammazzarlo, che e' la domanda a cui serve rispondere.
+
+    L'UNITA' DI `ru_maxrss` CAMBIA COL SISTEMA - byte su macOS, KB su Linux - e la
+    conversione va fatta SUL WORKER, non qui: il cluster e' Linux e questa macchina no,
+    quindi guardare `sys.platform` dal client darebbe un numero mille volte sbagliato
+    senza dire niente. Stessa cura di `Giulia/misura_ram.py`.
+    """
+    def rss_massima():
+        import resource
+        import sys as _sys
+
+        massimo = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        return massimo / 1e9 if _sys.platform == "darwin" else massimo / 1e6
+
+    picchi = list(client.run(rss_massima).values())
+    if not picchi:
+        return {}
+    return {"picco_gb": round(max(picchi), 2),
+            "picco_medio_gb": round(sum(picchi) / len(picchi), 2)}
 
 
 def stato_cluster(client):
@@ -233,6 +294,7 @@ def misura(p, files, args):
         with performance_report(filename=str(percorso), mode="inline"):
             riga["secondi"] = cronometra(client, collezioni, args.timeout)
         riga.update(stato_cluster(client))   # a misura finita: se un worker e' morto, si vede qui
+        riga.update(picco_memoria(client))   # e quanta RAM ha toccato al massimo
     except Exception as errore:
         riga["errore"] = f"{type(errore).__name__}: {errore}"[:200]
     finally:
@@ -270,6 +332,11 @@ def parse_args():
     parser.add_argument("--only", nargs="+", metavar="CURVA",
                         help="rilancia solo queste curve: riferimento worker partizioni "
                              "thread foldby (default: tutte, nell'ordine della campagna)")
+    parser.add_argument("--ripetizioni", type=int, default=1, metavar="N",
+                        help="quante volte ripetere TUTTA la campagna (default 1). Le "
+                             "ripetizioni sono passate intere e non misure consecutive: "
+                             "vedi `campagna`. Con N=3 la dispersione che ne esce e' una "
+                             "barra d'errore vera, non due run attaccati")
     parser.add_argument("--thread", type=int, metavar="N",
                         help="thread per worker per TUTTA la campagna (default: quanti "
                              "core ha il nodo). Serve a rifare la curva sulle partizioni "
@@ -294,7 +361,8 @@ def main():
     if not files:
         raise SystemExit(f"Nessun file .parquet in {source}")
 
-    lista = campagna(available_workers(REPO), thread=args.thread)
+    lista = campagna(available_workers(REPO), thread=args.thread,
+                     ripetizioni=args.ripetizioni)
     if args.only:
         lista = [p for p in lista if p["curva"] in args.only]
     if not lista:
@@ -319,7 +387,8 @@ def main():
         riga = misura(p, files, args)
         scrivi_riga(args.csv, riga)
         print("   ->", f"{riga['secondi']} s  ({riga['partizioni']} partizioni, "
-                       f"{riga['worker']} worker, {riga['thread']} thread in tutto)"
+                       f"{riga['worker']} worker, {riga['thread']} thread in tutto, "
+                       f"picco {riga.get('picco_gb', '?')} GB per worker)"
               if riga["secondi"] is not None else f"FALLITO  {riga['errore']}")
 
     print(f"\ncampagna finita in {(time.perf_counter() - inizio) / 60:.0f} minuti")

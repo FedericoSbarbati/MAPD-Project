@@ -227,33 +227,59 @@ Obbligatorie per il corso: tempo di esecuzione contro **numero di partizioni** e
 **numero di executor/processing unit**. Il testo dice «at least», e «processing units» si
 legge sia come *macchine* sia come *thread*: si misurano entrambi. In tutto **18 misure**.
 
-**Un comando, e la campagna gira da sola tutta la notte.** Ma prima si calibra.
+**Un comando, e la campagna gira da sola.** La campagna definitiva è questa:
 
 ```bash
-# 1. calibrazione, ~30 min: 3 misure dello stesso punto
-python Giulia/bench_word_count.py ~/mapd-data/silver/paragraphs --only riferimento
-
-# 2. la notte, ~4,5 h
 tmux new -s bench          # dura ore: non deve morire con la sessione SSH
-python Giulia/bench_word_count.py ~/mapd-data/silver/paragraphs 2>&1 | tee ~/bench.log
+python Giulia/bench_word_count.py ~/mapd-data/silver/paragraphs \
+    --thread 1 --ripetizioni 3 2>&1 | tee ~/bench.log
 ```
 
-La calibrazione non è un lusso: la stima delle 4,5 ore viene da **un solo dato del Mac**
-(274 s) moltiplicato per un fattore per-core indovinato, e può sbagliare del doppio. E tre
-accensioni di fila verificano i tre rischi noti — la porta 8786, i worker orfani, e dove
-finiscono i file scritti.
+`--thread 1` perché è **la configurazione che i benchmark hanno selezionato**: i thread
+rallentano a ogni `k` provato (+24% … +31%), quindi la campagna definitiva gira dove il
+codice va meglio. `--ripetizioni 3` sono **tre passate intere della campagna**, non tre
+misure di fila dello stesso punto: costa uguale e dice di più, perché fra due ripetizioni
+dello stesso punto passano ore e la dispersione include la variabilità della macchina
+nella giornata. E se la giornata si interrompe, quello che resta è *una campagna completa*
+invece di mezza curva misurata tre volte.
 
 | in ordine | cosa | perché lì |
 |---|---|---|
-| **1 · riferimento** ×3 | tutti i worker, `k=256`, `split_out=16` | è il punto **in comune ai tre assi**, e le sue 3 ripetizioni misurano il rumore una volta sola invece di pagarlo su ogni punto |
-| **2 · worker** | *obbligatorio*: stessi dati, stesso taglio, meno macchine | costo prevedibile, nessun punto può fallire |
-| **3 · partizioni** | *obbligatorio*: stessi dati, tagliati in modi diversi | dal centro ai bordi: la coda è sacrificabile |
-| **4 · thread** | l'altra lettura di «processing units» | due punti, a valle di quelli obbligatori |
+| **1 · riferimento** | tutti i worker, `k=256`, `split_out=16` | è il punto **in comune ai tre assi**, e calibra la stima dei tempi di tutto il resto |
+| **2 · partizioni** | *obbligatorio*: stessi dati, tagliati in modi diversi | dal centro ai bordi: è la curva col minimo, e la coda è sacrificabile |
+| **3 · worker** | *obbligatorio*: stessi dati, stesso taglio, meno macchine | dopo le partizioni: il punto con un worker solo costa da solo mezz'ora |
+| **4 · thread** | l'altra lettura di «processing units» | il valore uguale al riferimento viene tolto da solo |
 | **5 · foldby** | `split_out=0` sul cluster vero | ultimo apposta: se non completa, *quello* è il risultato |
 
+Ogni riga del CSV porta anche il **picco di RAM dei worker** (`picco_gb`, `picco_medio_gb`).
+Non c'è nessun campionamento: `ru_maxrss` è il massimo storico del processo, e siccome ogni
+misura accende un cluster nuovo, quel massimo **è** il picco di quella misura. È lo stesso
+strumento di `misura_ram.py`, che misura il picco di *un task* in isolamento: confrontare i
+due numeri dice se i thread si sommano davvero.
+
+### Un worker per core
+
+`SSHCluster` accende **un worker per voce** in `cluster.txt`, quindi ripetere un IP mette
+più processi sulla stessa macchina. Serve a separare le due spiegazioni del rallentamento
+dei thread, che i dati attuali non distinguono: **16 worker × 1 thread** hanno lo stesso
+budget di memoria per task dei **4 worker × 4 thread**, ma un GIL a testa. Se il 16×1 va
+molto più veloce la colpa è del GIL; se va uguale, è la pressione di memoria.
+
+```bash
+W=10.67.22.78,10.67.22.148,10.67.22.77,10.67.22.40
+CORD19_HOSTS="10.67.22.74,$W,$W,$W,$W" CORD19_WORKER_MEMORY_LIMIT=1.7GB \
+python Giulia/bench_word_count.py ~/mapd-data/silver/paragraphs \
+    --thread 1 --only riferimento partizioni --out ~/mapd-out/bench-16x1
+```
+
+`CORD19_HOSTS` scavalca `cluster.txt` senza toccarlo, quindi non resta niente da rimettere
+a posto. **`CORD19_WORKER_MEMORY_LIMIT` non è opzionale**: il default è una *frazione della
+RAM di sistema per worker*, quindi quattro worker sulla stessa macchina si impegnerebbero
+28 GB su 8 e li ammazzerebbe l'OOM killer di Linux — non la nanny di Dask, che crede di
+avere tutta la memoria. 1,7 GB è 7,1 diviso quattro.
+
 **Prima di lasciarla andare, la prova generale** — la stessa identica campagna sul
-campione, quattro minuti. Serve a scoprire un percorso sbagliato la sera invece che alle
-sette del mattino:
+campione. Serve a scoprire un percorso sbagliato la sera invece che alle sette del mattino:
 
 ```bash
 python Giulia/bench_word_count.py --out /tmp/bench-prova --timeout 300

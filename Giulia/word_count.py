@@ -17,6 +17,7 @@ Sanitization rules are all measured, not customary - see NOTES.md.
 
 import argparse
 import operator
+import os
 import re
 import sys
 import time
@@ -356,6 +357,14 @@ def main():
     client, cluster = get_client(repo_root=repo)
     print("input     :", source, f"({len(files)} file)")
     print("output    :", out)
+
+    # Il vocabolario lo scrivono I WORKER, ognuno sul proprio disco, mentre `to_parquet`
+    # crea la cartella solo qui sul client: fsspec apre in scrittura con
+    # `auto_mkdir=False`. Senza questa riga, su un cluster vero il primo task di scrittura
+    # muore con FileNotFoundError su ogni macchina che non ce l'ha - e su una macchina
+    # sola non si vede, perche' il disco e' lo stesso. E' anche il motivo per cui a fine
+    # run la cartella sulla macchina scheduler resta VUOTA: li' non gira nessun worker.
+    client.run(os.makedirs, str(out / "word_counts"), exist_ok=True)
 
     paragraphs = read_groups(split_evenly(files, args.partitions or len(files)))
     print("partitions:", paragraphs.npartitions)
