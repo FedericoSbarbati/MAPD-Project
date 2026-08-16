@@ -116,16 +116,24 @@ def describe(client, modo, dettaglio):
     di quattro sembra un cluster lento, non una configurazione sbagliata, e te ne accorgi
     a sessione bruciata. La riga da guardare è `worker: N su 1 host ['127.0.0.1']`.
     """
-    workers = client.scheduler_info()["workers"].values()
-    host = {w["host"] for w in workers}
-    memoria = sum(w.get("memory_limit", 0) for w in workers)
+    # `nthreads()` e non `scheduler_info()["workers"]`: quest'ultimo SOTTO-CONTA quando
+    # piu' worker stanno sulla stessa macchina (distributed 2026.6.0: otto worker veri,
+    # ne dichiara cinque, e non si corregge mai). Proprio qui sarebbe il danno peggiore,
+    # perche' questa e' la riga che esiste per NON avere fallback silenziosi.
+    thread = client.nthreads()
+    host = {indirizzo.rsplit("://", 1)[-1].rsplit(":", 1)[0] for indirizzo in thread}
+    # Il tetto per worker e' uguale per tutti: si legge da uno qualsiasi di quelli che
+    # `scheduler_info` riporta, e si moltiplica per il numero VERO di worker.
+    conosciuti = list(client.scheduler_info()["workers"].values())
+    per_worker = conosciuti[0].get("memory_limit", 0) if conosciuti else 0
+    memoria = per_worker * len(thread)
     print("=" * 70)
     print(f"cluster   : {modo}")
     print(f"            {dettaglio}")
-    print(f"worker    : {len(workers)} su {len(host)} host {sorted(host)}")
-    print(f"thread    : {sum(w.get('nthreads', 0) for w in workers)}")
+    print(f"worker    : {len(thread)} su {len(host)} host {sorted(host)}")
+    print(f"thread    : {sum(thread.values())}")
     print(f"memoria   : {memoria / 1e9:.1f} GB totali "
-          f"({memoria / max(len(workers), 1) / 1e9:.1f} GB per worker)")
+          f"({per_worker / 1e9:.1f} GB per worker)")
     print(f"dashboard : {client.dashboard_link}")
     if modo == "LocalCluster":
         print("            ATTENZIONE: tutto su questa sola macchina. Per usare il")

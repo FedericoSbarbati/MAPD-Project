@@ -146,25 +146,39 @@ riscrivi qui.
   non una curva) e **una riga sola** per il `foldby` sul cluster vero. Niente altro.
   *Rifatti da zero il 2026-08-13, riscritti il 2026-08-14.*
 - **Il cluster dei benchmark è 5 × `cloudveneto.large`** (1 scheduler + 4 worker da 4 vCPU
-  e 8 GB). 4 core danno tre punti alla misura sui thread. **Gli 8 GB NON bastano al ramo
-  basso della curva sulle partizioni:** sotto `k=128` il job non è eseguibile, perché il
-  picco di un task è ~15× il testo che elabora (4,07 GB a `k=64`, ×4 thread = 16,3 GB
-  contro un tetto di 7,1). È un confine misurato, si riporta come risultato.
-  *Misurato il 2026-08-14, sostituisce «8 GB fanno completare anche il punto più estremo».*
+  e 8 GB, cioè 7,1 GB di `memory_limit`). **Il muro sulle partizioni lo mette la memoria
+  PER SLOT, e la soglia è NETTA:** la nanny uccide sopra `0,95 × memory_limit` = 6,74 GB, e
+  a `k=32` il worker arriva a 6,41 — ci passa sotto tre volte su tre, a `k=16` no.
+  Dimezzare la memoria per worker sposta il muro di un passo in `k` (7,1 GB → `k=32`,
+  3,4 → `128`, 1,7 → `256`), perché il picco di un task va come 1/k.
+  *Misurato il 2026-08-16 col picco per worker nel CSV. Sostituisce «sotto `k=128` il job
+  non è eseguibile, il picco è ~15× il testo, ×4 thread = 16,3 GB»: sbagliata tre volte —
+  il muro è a `k=32` con un thread, l'espansione si ferma a ~13,8×, e quattro thread
+  moltiplicano il picco per 1,57 e non per 4 perché non capitano insieme.*
   → `Giulia/misura_ram.py`, `SETUP_CLOUDVENETO.md` §6
 - **Una riga del CSV = una misura = un cluster nuovo.** Non è pignoleria: un worker che ha
   già macinato milioni di stringhe trattiene RSS per frammentazione glibc, quindi riusando
   un cluster per nove punti l'ultimo misurerebbe partizionamento **più** usura.
   → `PROJECT_CONTEXT.md` §7 Atto 3
-- **Tutte le misure sono ancorate a un unico punto di riferimento** (tutti i worker,
-  `k=256`, `split_out=16`, thread di default), **ripetuto 3 volte**. Il rumore si misura
-  una volta sola invece di pagarlo su ogni punto: altrove basta una ripetizione. Quel
-  punto appartiene a tutte le curve, quindi nei grafici l'asse x si legge dalle colonne di
-  stato (`partizioni`, `worker`, `thread`) e non dalla colonna `valore`.
-- **L'ordine della campagna è progettato per una notte che può interrompersi:**
-  riferimento → worker → partizioni **dal centro verso i bordi** → thread → foldby. I
-  punti bassi di `k` sono i più lenti e i più fragili e stanno in fondo, così quello che
-  resta in mano è il minimo della curva con i due rami vicini.
+- **Le ripetizioni sono PASSATE INTERE della campagna** (`--ripetizioni N`), non misure
+  consecutive dello stesso punto. Costa uguale e dice di più: fra due ripetizioni dello
+  stesso punto passano ore, quindi la dispersione comprende la variabilità della macchina
+  nella giornata e non solo quella di due run attaccati; e una giornata interrotta lascia
+  **una campagna completa** invece di mezza curva misurata tre volte. Tutto è ancorato a un
+  unico punto di riferimento (tutti i worker, `k=256`, `split_out=16`), che appartiene a
+  tutte le curve: nei grafici l'asse x si legge dalle colonne di **stato** (`partizioni`,
+  `worker`, `thread`) e non da `valore`. **Ma quelle colonne si verificano, non si
+  credono:** fino al 2026-08-16 le riempiva `client.scheduler_info()["workers"]`, che
+  **sotto-conta quando più worker stanno sulla stessa macchina** — otto worker veri, ne
+  dichiara cinque, e non si corregge né dopo un refresh né dopo `wait_for_workers`. Adesso
+  si usa `client.nthreads()`; i CSV di `bench-8x1` e `bench-16x1` restano marchiati
+  «5 worker» e vanno letti sapendolo.
+  *2026-08-16, sostituisce «riferimento ripetuto 3 volte, 1 altrove».*
+- **L'ordine della campagna è progettato per una giornata che può interrompersi:**
+  riferimento → **partizioni dal centro verso i bordi** → worker → thread → foldby. Le
+  partizioni prima dei worker perché sono la curva col minimo, e il punto a un worker solo
+  costa da solo mezz'ora; i `k` bassi in fondo perché sono i più lenti e i più fragili.
+  *2026-08-16, sostituisce l'ordine «riferimento → worker → partizioni».*
 - **La campagna non si lancia mai senza averla prima calibrata** (`--only riferimento`,
   ~30 min): le stime dei tempi vengono da un solo dato del Mac e possono sbagliare del
   doppio.
@@ -386,3 +400,33 @@ Curva partizioni con `--thread 1` (previsione scritta: `k=64` passa, `k=32` no) 
 §6 contiene ancora l'affermazione falsificata sugli 8 GB · GIL vs pressione di memoria non
 separati dai dati attuali · un worker per core (IP ripetuti in `cluster.txt`) mai approvato
 · scaricare `~/mapd-out` dalla VM · errore mio da non ripetere: previsioni date per fatti.
+
+---
+## 2026-08-16
+
+**Decisioni + perché**
+Campagna definitiva a **3 passate intere** (48 misure, 4 worker × 1 thread): il minimo sulle
+partizioni è un **plateau** `k=128`–`256`, non un punto — 0,36% di distanza contro 1,3–2,7%
+di rumore, e chiamarlo «minimo a 256» sarebbe leggere rumore.
+`bench-8x1` e `bench-16x1` chiudono l'open thread **GIL o memoria**: a parità di 8 core e di
+memoria per slot, 8 processi fanno 204,7 s contro i 416,2 di 4×2 thread e **nessuna delle due
+è vicina al tetto** → è il GIL; 16 core rendono **11,59×** come processi (eff. 0,72) contro
+**2,44×** come thread (0,15), cioè **4,7×** sullo stesso hardware.
+Sostituite in Parte A tre regole: il muro (è la memoria per slot, soglia netta a
+`0,95 × memory_limit`), le ripetizioni (passate intere), l'ordine (partizioni prima dei worker).
+
+**Collegamenti toccati**
+`bench_word_count.py` (+`picco_gb`/`picco_medio_gb` da `ru_maxrss`, +`--ripetizioni`,
+`stato_cluster` ora su `client.nthreads()`) · `cluster.py:describe()` stessa cura ·
+`word_count.py` (+`client.run(os.makedirs)`: senza, sul cluster non girava — e infatti non ci
+era mai girato, il 2.3.1 non esisteva) → `risultati/` git-ignored (5 campagne, 6 log,
+vocabolario 2.3.1 da 16 shard, 0 duplicati) · `SETUP_CLOUDVENETO.md` §3 e §6 corretti ·
+banco di prova cieco con `--nworkers 6`, che ha preso due difetti prima del cluster.
+
+**Thread aperti**
+Vocabolario: 6.098.548 parole misurate contro 6.037.808 documentate in `word_count.py:245`,
+sanificazione invariata dal commit precedente — un run locale da 15 min chiude · `README` e
+`word_count.ipynb` §9 hanno ancora i numeri della prima campagna e le due tesi corrette
+(tetto netto, thread ×1,57 e non ×4) · `bench-8x1`/`16x1` sono una passata sola e la loro
+colonna `worker` dice 5 · perché `scheduler_info()` sotto-conti resta ignoto, curato non
+capito.

@@ -240,10 +240,18 @@ def stato_cluster(client):
 
     Non quanti ne avevi chiesti: se durante la misura ne e' morto uno, la riga del CSV
     deve dirlo, altrimenti fra sei settimane quella misura non e' piu' interpretabile.
+
+    `client.nthreads()` e NON `client.scheduler_info()["workers"]`: il secondo SOTTO-CONTA
+    quando piu' worker girano sulla stessa macchina, e non si corregge mai. Misurato su
+    distributed 2026.6.0 con otto worker veri su un host: `scheduler_info()` ne dice
+    CINQUE, `nthreads()` otto - e otto e' il numero giusto, perche' `wait_for_workers(8)`
+    non va in timeout e la dashboard ne mostra otto. Non e' una fotografia scattata
+    presto: rileggendo dopo quindici secondi dice ancora cinque, e ne' un refresh
+    esplicito ne' `wait_for_workers` lo aggiustano. Ha marchiato "5 worker" due campagne
+    che ne avevano 8 e 16.
     """
-    workers = client.scheduler_info()["workers"].values()
-    return {"worker": len(workers),
-            "thread": sum(w.get("nthreads", 0) for w in workers)}
+    thread = client.nthreads()
+    return {"worker": len(thread), "thread": sum(thread.values())}
 
 
 def misura(p, files, args):
