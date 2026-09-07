@@ -43,9 +43,23 @@ DEFAULT_OUTPUT = "~/mapd-out/title_embeddings"       # outside the repo: it is d
 N_DIM = 300                  # fastText vector size, fixed by the model
 VECTOR_COLUMNS = [f"v{i}" for i in range(N_DIM)]
 
-# How wide the Map is: how many partitions the titles are cut into. 0 = leave the
-# partitioning that Parquet gives (one per file).
-PARTITIONS = 0
+# The dtype of the join key, declared once and used on BOTH sides. Saying "string" is not
+# enough: pandas has two storages behind that name (python and pyarrow), they print
+# identically, and joining one against the other makes Dask warn about a dtype mismatch -
+# the kind of warning whose worst outcome is a silently empty join.
+WORD_DTYPE = "string[pyarrow]"
+
+# How wide the Map is: how many partitions the titles are cut into. 0 = leave whatever
+# the Parquet reader gives.
+#
+# 64 AND NOT 0, and the reason is the whole memory story of this task. The join widens
+# every row by 300 float32 (1.2 kB), so the ~7.8 M (paper, word) pairs of the full corpus
+# become ~9.3 GB: the peak of ONE task is that divided by the number of partitions, and
+# every thread of a worker holds one at a time. Measured on the cluster (3 workers x 2
+# threads, 3.5 GB each): leaving the reader's own partitioning gave THREE partitions -
+# 3.1 GB per task, 6.2 GB per worker - and every worker was killed. At 64 it is 0.15 GB
+# per task. Same law as the word count campaign: the peak of a task goes as 1/k.
+PARTITIONS = 64
 
 # How the model file is cut. It is the second width knob, and the one specific to this
 # task: a block is what ONE task reads, parses and filters.
@@ -101,11 +115,11 @@ def tokenize(papers):
     tokens = tokens[["cord_uid", "word"]].explode("word")
     tokens = tokens.dropna(subset=["word"])
     tokens = tokens[~tokens["word"].isin(STOPWORDS)]
-    # The join key is declared on BOTH sides (see `read_model`): `explode` returns an
-    # object column while the CSV reader may return a string one, and joining two
-    # different dtypes is what Dask warns about with "Cast dtypes explicitly to avoid
-    # unexpected results" - the kind of warning that becomes an empty result.
-    return tokens.astype({"word": "string"})
+    # The join key is declared on BOTH sides with the SAME dtype (see `read_model` and
+    # WORD_DTYPE): `explode` returns an object column, the CSV reader returns a string
+    # one, and even two "string" columns with different storage make Dask warn with
+    # "Cast dtypes explicitly to avoid unexpected results".
+    return tokens.astype({"word": WORD_DTYPE})
 
 
 # ----------------------------------------------------------------------------------
@@ -139,7 +153,7 @@ def read_model(path, blocksize=BLOCKSIZE):
         sep=" ",
         header=None,
         names=["word"] + VECTOR_COLUMNS,
-        dtype={**{c: "float32" for c in VECTOR_COLUMNS}, "word": "string"},
+        dtype={**{c: "float32" for c in VECTOR_COLUMNS}, "word": WORD_DTYPE},
         quoting=csv_module.QUOTE_NONE,
         keep_default_na=False,
         na_values=[""],

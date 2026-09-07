@@ -60,10 +60,13 @@ CODICE = REPO / "daniele" / "title_embeddings.py"
 DEFAULT_INPUT = "data_sample/silver/papers"
 DEFAULT_OUT = "~/mapd-out/bench-embeddings"
 
-# Il punto di riferimento: e' anche il punto in comune a tutte le curve.
-# 32 partizioni di titoli = ~30 k titoli l'una: abbastanza fini da bilanciare il carico
-# su pochi worker, abbastanza grosse da non annegare nello scheduling.
-K_RIFERIMENTO = 32
+# Il punto di riferimento: e' anche il punto in comune a tutte le curve, ed e' la
+# configurazione che il task consegna davvero (`title_embeddings.PARTITIONS`).
+# 64 partizioni = ~15 k titoli l'una. Il vincolo NON e' il tempo ma la memoria: il join
+# allarga ogni riga di 300 float32, quindi il picco di una task e' ~9,3 GB / k e ogni
+# thread ne tiene una. A k=64 sono 0,15 GB; a k=3 (il partizionamento che dava il reader
+# da solo) erano 3,1 GB, e i worker da 3,5 GB sono morti tutti.
+K_RIFERIMENTO = te.PARTITIONS
 # 64 MB di modello per blocco = ~70 blocchi sul file da 4,5 GB. E' la stessa scala che il
 # gruppo dell'anno scorso aveva trovato migliore sul loro modello (32-128 MB).
 BLOCK_RIFERIMENTO = "64MB"
@@ -71,7 +74,10 @@ SPLIT_OUT_RIFERIMENTO = 8
 
 # Dal centro verso i bordi: se la campagna si interrompe, quello che resta in mano e' il
 # minimo della curva con i due rami vicini, cioe' la parte che risponde alla domanda.
-PARTIZIONI = (16, 64, 8, 128, 4, 256)
+# I valori BASSI stanno in fondo perche' sono quelli che muoiono: sotto k=16 il picco per
+# task supera il tetto del worker. Non e' un problema da evitare - e' il punto in cui la
+# curva finisce, ed e' un risultato da riportare (come il KilledWorker del word count).
+PARTIZIONI = (32, 128, 16, 256, 8, 4)
 BLOCCHI = ("32MB", "128MB", "16MB", "256MB")
 THREAD = (2, 4, 1)
 SPLIT_OUT = (16, 4, 1)

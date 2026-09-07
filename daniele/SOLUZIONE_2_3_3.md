@@ -173,7 +173,32 @@ in mano è una campagna completa invece di mezza curva misurata tre volte.
 Il notebook (§8) legge `misure.csv` e disegna, per ogni manopola, tempo e picco di RAM
 affiancati.
 
-## 5 · Cose da sapere / limiti
+## 5 · Il muro della memoria, misurato sul cluster
+
+Il primo run sul corpus intero è **morto** con `KilledWorker`, e vale la pena raccontarlo
+perché è la stessa legge che governa la curva del word count.
+
+Il colpevole è il join: attacca **300 float32 (1,2 kB) a ogni riga**. Le ~7,8 milioni di
+coppie `(paper, parola)` del corpus diventano **~9,3 GB**, e il picco di **una** task è
+quel totale diviso il numero di partizioni — con ogni thread del worker che ne tiene una:
+
+| partizioni | picco per task | × 2 thread | su worker da 3,5 GB |
+|---:|---:|---:|---|
+| 3 | 3,11 GB | 6,21 GB | **morto** (il primo run) |
+| 16 | 0,58 GB | 1,17 GB | ok |
+| 64 | 0,15 GB | 0,29 GB | ok (default) |
+
+Con `PARTITIONS = 0` (lascia al reader il suo partizionamento) i 9 file del silver
+venivano aggregati dall'ottimizzatore in **tre** partizioni sole — è il fenomeno
+«partizioni ≠ file» di `PROJECT_CONTEXT.md` §8.6 — e ogni task chiedeva 3,1 GB.
+Il default è quindi **64**, e la manopola `partizioni` del benchmark serve proprio a
+misurare dove sta il muro invece di indovinarlo.
+
+Due leve in più, se un giorno il muro si riavvicina: `CORD19_THREADS_PER_WORKER=1`
+(dimezza il picco per worker, e sul word count i thread peggioravano comunque i tempi) e
+macchine più grandi.
+
+## 6 · Cose da sapere / limiti
 
 - **L'output degli embedding è distribuito**: lo scrivono i worker, ognuno sul proprio
   disco, quindi la cartella sulla macchina scheduler resta **vuota**. È il motivo del
