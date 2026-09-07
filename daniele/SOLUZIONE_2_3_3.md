@@ -198,6 +198,38 @@ Due leve in più, se un giorno il muro si riavvicina: `CORD19_THREADS_PER_WORKER
 (dimezza il picco per worker, e sul word count i thread peggioravano comunque i tempi) e
 macchine più grandi.
 
+### Secondo atto: il broadcast lo facciamo noi, non Dask
+
+Sistemate le partizioni, il run è morto una seconda volta — ma con un messaggio molto più
+utile:
+
+```
+MemoryError: Task ('broadcastjoin-...', 0) has 8.04 GiB worth of input dependencies,
+but worker ... has memory_limit set to 3.25 GiB
+```
+
+Il numero però **non torna**: il modello filtrato sono ~162 mila parole a 1,2 kB l'una,
+cioè **0,2 GB** (misurato). Dask ne dichiarava 8, quaranta volte tanto: con
+`merge(..., broadcast=True)` ogni partizione in uscita risultava dipendere dal lato
+modello *nel suo insieme*, e lo scheduler si rifiutava di partire.
+
+La cura è smettere di far decidere a lui una cosa che sappiamo già:
+
+```python
+table = model.compute()                              # 0,2 GB: piccolo e motivato
+handle = client.scatter(table, broadcast=True)       # una copia per worker, una volta
+joined = tokens.map_partitions(_join_block, handle)  # da qui in poi tutto è locale
+```
+
+È **esattamente il broadcast della Lecture 2 di Dask** (`client.scatter(obj,
+broadcast=True)`), ed è la stessa mossa dell'Atto 1 della conversione, dove un `merge` fu
+riscritto come broadcast. Il costo diventa **noto**: 0,2 GB per worker, una volta sola,
+e nessuno shuffle. `--no-broadcast` resta come alternativa da manuale (join distribuito
+vero, con rimescolamento di entrambi i lati) ed è una delle manopole del benchmark.
+
+Il `.py` stampa ora quanto pesa davvero la tabella broadcastata:
+`model kept : 161,901 words, 0.20 GB to every worker`.
+
 ## 6 · Cose da sapere / limiti
 
 - **L'output degli embedding è distribuito**: lo scrivono i worker, ognuno sul proprio

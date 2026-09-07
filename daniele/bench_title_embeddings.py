@@ -203,7 +203,7 @@ def misura(p, source, model_path, args):
             embeddings, vocabolario, partizioni = te.build(
                 source, model_path,
                 partitions=p["partizioni"], blocksize=p["blocksize"],
-                split_out=p["split_out"], broadcast=p["broadcast"])
+                split_out=p["split_out"], broadcast=p["broadcast"], client=client)
             scrittura = embeddings.to_parquet(destinazione, write_index=False,
                                               compression="zstd", overwrite=True,
                                               compute=False)

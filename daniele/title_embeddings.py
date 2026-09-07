@@ -209,22 +209,51 @@ def _to_mean(block):
     return pd.concat([head, means], axis=1)
 
 
-def mean_pooling(tokens, model, split_out=SPLIT_OUT, broadcast=True):
+def _join_block(block, table):
+    """Attach the vectors to ONE partition of tokens: a plain, local pandas merge.
+
+    `table` is the whole filtered model as an ordinary DataFrame, already sitting in the
+    worker's memory (see `join_vectors`), so nothing travels while this runs.
+    """
+    return block.merge(table, on="word", how="inner")
+
+
+def join_vectors(tokens, model, broadcast=True, client=None):
+    """Give every (paper, word) row its vector. -> DataFrame[cord_uid, word, v0..v299]
+
+    Two strategies, and the difference is the interesting part.
+
+    `broadcast=True` (default). The filtered model is SMALL - on the full corpus about
+    162 k words at 1.2 kB each, i.e. **0.2 GB**. So we compute it once and hand the whole
+    table to every worker with `client.scatter(..., broadcast=True)`: it is exactly the
+    "send the same small object to everybody" of the Dask lecture. From then on each
+    partition of titles joins locally, nothing is shuffled, and the `groupby` that follows
+    can sum a paper's words inside its own partition. Same shape as the prefer-pmc join of
+    the conversion step (PROJECT_CONTEXT.md §7, Atto 1), where a `merge` was rewritten as
+    a broadcast for the same reason.
+
+    We deliberately do NOT use `merge(..., broadcast=True)`, which lets Dask decide.
+    Measured on the cluster: it made each output partition depend on the model side as a
+    whole and refused to start with "8.04 GiB worth of input dependencies" against a
+    3.25 GiB worker - about thirty times the real size of that table. Doing the broadcast
+    ourselves makes the cost knowable: one copy of 0.2 GB per worker, once.
+
+    `broadcast=False` is the textbook alternative, kept as a benchmark knob: a real
+    distributed join, which shuffles both sides by `word`.
+    """
+    if not broadcast:
+        return tokens.merge(model, on="word", how="inner")
+
+    table = model.compute()          # small and motivated: it is what the filter is for
+    print(f"model kept : {len(table):,} words, "
+          f"{table.memory_usage(deep=True).sum() / 1e9:.2f} GB to every worker")
+    handle = client.scatter(table, broadcast=True) if client is not None else table
+    return tokens.map_partitions(_join_block, handle,
+                                 meta=_join_block(tokens._meta, model._meta))
+
+
+def mean_pooling(merged, split_out=SPLIT_OUT):
     """Average the word vectors of each title. -> DataFrame[cord_uid, n_words, v0..v299]
-
-    The join is inner: a word the model does not know simply disappears, which is what
-    the assignment asks for.
-
-    WHY `broadcast`. Joining on `word` normally means shuffling BOTH sides by word - and
-    the left side, after the join, carries 300 floats per (paper, word) row: on the full
-    corpus that is several GB crossing the network, and it also scatters the words of a
-    paper over many partitions, so the groupby that follows has nothing left to reduce
-    locally. Broadcasting sends the (small) filtered model to every worker instead: the
-    join becomes local, the titles keep their original partitioning, and the `groupby`
-    can sum a paper's words inside the partition BEFORE anything moves. Same trick, and
-    the same reason, as the prefer-pmc join of the conversion step
-    (PROJECT_CONTEXT.md §7, Atto 1). `broadcast=False` is kept as a knob because the
-    difference between the two is worth measuring.
 
     The average is ONE `groupby.sum` plus a division, not a collected list of vectors:
     summing is associative, so Dask reduces inside each partition and then combines the
@@ -233,7 +262,6 @@ def mean_pooling(tokens, model, split_out=SPLIT_OUT, broadcast=True):
     `split_out` keeps the tail parallel: with a single output partition the last task
     holds every embedding at once.
     """
-    merged = tokens.merge(model, on="word", how="inner", broadcast=broadcast)
     merged = merged.assign(n=np.float32(1.0))
 
     sums = merged.groupby("cord_uid")[VECTOR_COLUMNS + ["n"]].sum(
@@ -246,13 +274,13 @@ def mean_pooling(tokens, model, split_out=SPLIT_OUT, broadcast=True):
 
 
 def build(source, model_path, partitions=PARTITIONS, blocksize=BLOCKSIZE,
-          split_out=SPLIT_OUT, broadcast=True):
+          split_out=SPLIT_OUT, broadcast=True, client=None):
     """The whole pipeline, up to the collection that still has to be computed.
 
     Returns (embeddings, vocabulary_size, n_partitions). NOTE that this is not fully
-    lazy: the vocabulary has to exist on the driver before the model can be filtered, so
-    computing it is a real, unavoidable first pass over the titles. It is the reason the
-    task has two phases and not one.
+    lazy: the vocabulary has to exist on the driver before the model can be filtered
+    (and, with `broadcast`, the filtered model has to exist before it can be handed
+    around). Those two passes are real, and they are why the task has phases at all.
     """
     papers = read_titles(source, partitions)
     tokens = tokenize(papers).persist()      # read twice: vocabulary, then the join
@@ -262,7 +290,8 @@ def build(source, model_path, partitions=PARTITIONS, blocksize=BLOCKSIZE,
     model = read_model(model_path, blocksize)
     model = model.map_partitions(keep_vocabulary_words, vocabulary, meta=model._meta)
 
-    embeddings = mean_pooling(tokens, model, split_out, broadcast)
+    merged = join_vectors(tokens, model, broadcast, client)
+    embeddings = mean_pooling(merged, split_out)
     return embeddings, len(vocabulary), tokens.npartitions
 
 
@@ -334,7 +363,7 @@ def main():
     try:
         embeddings, n_vocabulary, n_partitions = build(
             source, model_path, args.partitions, args.blocksize, args.split_out,
-            broadcast=not args.no_broadcast)
+            broadcast=not args.no_broadcast, client=client)
         print("partitions:", n_partitions)
         print("vocabulary:", f"{n_vocabulary:,} distinct title words")
         print("join      :", "shuffle" if args.no_broadcast else "broadcast of the model")
