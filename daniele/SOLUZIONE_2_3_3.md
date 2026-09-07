@@ -1,155 +1,197 @@
-# Soluzione del punto 2.3.3 — Title embeddings (Dask)
+# Task 2.3.3 — Title embeddings
 
-Questa cartella (`MAPD-Project/daniele/`) contiene la soluzione del punto **2.3.3
-"Obtaining Embeddings for Paper Titles"** dell'assignment. Tre file:
+Soluzione del punto **2.3.3 "Obtaining Embeddings for Paper Titles"**: il titolo di ogni
+paper diventa un vettore numerico usando il modello pre-addestrato fastText
+`crawl-300d-2M-subword.vec`.
 
 | File | Cosa è |
 |---|---|
-| `task_2_3_3_title_embeddings.ipynb` | Il notebook con la soluzione (codice e testo **in inglese**) |
-| `requirements.txt` | Le versioni dei pacchetti usati — **già tutti installati** sulle VM, non serve installare nulla |
-| `SOLUZIONE_2_3_3.md` | Questo documento |
+| `title_embeddings.py` | **La fonte di verità**: le funzioni e il `main()`. È quello che gira |
+| `bench_title_embeddings.py` | La campagna di benchmark: un comando, una riga di CSV per misura |
+| `task_2_3_3_title_embeddings.ipynb` | Il notebook: **importa** il `.py`, spiega e disegna i grafici |
+| `requirements.txt` | Le versioni usate — già tutte presenti in `~/pyvenv` sulle VM |
+
+Convenzione del repo (`docs/DECISIONI.md`): **un `.py` con le funzioni, un notebook che
+lo importa**, mai codice duplicato tra i due. Sul cluster si lancia il `.py` da terminale.
 
 ---
 
-## 1. Come si lancia (checklist)
+## 1 · Come si lancia
 
-1. Pusha questa cartella sul main; sullo scheduler aggiorna la copia del repo in `/data/MAPD-Project`.
-2. **Aggiorna `cluster.txt`** nella root del repo **sulla VM** (è git-ignored, si edita
-   direttamente lì — vedi §5): con gli IP attuali la riga è:
-   ```
-   10.67.22.118,10.67.22.206,10.67.22.53
-   ```
-   (primo host = scheduler, gli altri = worker; **non** ho messo lo scheduler anche
-   come worker perché ha solo 3.8 GB e ospita già Jupyter + scheduler Dask).
-3. Sullo scheduler: `bash scripts/cluster_storage_up.sh` (monta `/data` sui worker via NFS —
-   ho verificato che al momento sui worker **non** è montato, quindi va rifatto a ogni sessione).
-4. Avvia Jupyter dallo scheduler (dal venv: `source ~/pyvenv/bin/activate`), apri il
-   notebook **dalla cartella del repo** (cwd = `/data/MAPD-Project/daniele` o la root del
-   repo: `cluster.txt` viene cercato nella cwd e nella cartella padre) ed esegui le celle in ordine.
-5. A fine lavoro esegui l'ultima cella (`client.close()` / `cluster.close()`).
+```bash
+# sullo scheduler, dal repo clonato in ~/MAPD-Project
+source ~/pyvenv/bin/activate
 
-Non c'è **nessun altro file da modificare** fuori da questa cartella: serve solo
-l'aggiornamento di `cluster.txt` (punto 2), che comunque è git-ignored.
+# il task
+python daniele/title_embeddings.py ~/mapd-data/silver/papers
 
-## 2. Struttura della soluzione e flusso logico
-
-Il notebook è diviso in stage, ognuno cronometrato e campionato in memoria:
-
-```
-Stage A  silver/papers ──► filtro title_ok ──► tokenizzazione dei titoli
-         (dd.read_parquet, solo 5 colonne)     (findall + explode + stop-word)
-                                               ══► tokens = (cord_uid, word)   [persist]
-
-Stage B  vocabolario = parole uniche dei titoli (al driver, ~10⁵ stringhe)
-         modello .vec (4.5 GB) ──► dd.read_csv a blocchi da 64 MB
-                               ──► filtro "tieni solo le parole del vocabolario"
-                                               ══► model_f = (word, v0..v299)  [persist]
-
-Stage C  tokens ⋈ model_f (inner join su word)
-         ──► groupby(cord_uid).sum() + divisione = MEDIA dei vettori (mean pooling)
-         ──► + title, is_title_unique   ──► Parquet in /data/output_2.3.3/run_N/
+# la campagna di benchmark (prima la prova generale, poi la calibrazione, poi sul serio)
+python daniele/bench_title_embeddings.py --out /tmp/bench-prova --timeout 300
+python daniele/bench_title_embeddings.py ~/mapd-data/silver/papers --only riferimento
+tmux new -s bench-emb
+python daniele/bench_title_embeddings.py ~/mapd-data/silver/papers --ripetizioni 3 2>&1 | tee ~/bench-emb.log
 ```
 
-Scelte principali, e perché:
+**Prerequisiti sulle macchine** (non sono nel repo perché non ci possono stare):
 
-- **Input `silver/papers`** (vedi `DATA_DICTIONARY.md`): 406 211 righe, 9 partizioni.
-  Uso `title_norm` (già minuscolo e ripulito) per la tokenizzazione e porto in output
-  `title` e `is_title_unique`, che serviranno al punto 2.3.4 (i titoli duplicati danno
-  similarità ~1 banali).
-- **Tokenizzazione semplice**: `findall('[a-z]{2,}')` + explode + rimozione di ~60
-  stop-word inglesi (lista hardcoded nel notebook: niente dipendenze extra tipo NLTK).
-  Le parole che non esistono nel modello vengono **saltate** via inner join, come
-  suggerisce l'assignment.
-- **Output = un vettore da 300 numeri per titolo** (media dei vettori delle parole,
-  "mean pooling"): è la rappresentazione "aggregated into a single vector" prevista
-  dall'assignment, ha dimensione fissa ed è quella pratica per la cosine similarity
-  del 2.3.4. La media è calcolata come **un'unica groupby-sum distribuita** (riduzione
-  ad albero, stessa logica del `foldby` visto a lezione) più una divisione per il
-  conteggio: un solo shuffle in tutto.
-- **Formato output**: Parquet zstd, schema `cord_uid | title | is_title_unique |
-  n_words | v0..v299` (`n_words` = quante parole del titolo hanno trovato un vettore).
+1. `cluster.txt` nella radice del repo, sullo scheduler — è git-ignored, si scrive lì:
+   ```
+   10.67.22.144,10.67.22.162,10.67.22.225,10.67.22.237
+   ```
+   Il **primo host fa solo da scheduler**, gli altri tre sono worker.
+2. Il modello in `~/mapd-model/crawl-300d-2M-subword.vec` **su ogni macchina che fa da
+   worker** (vedi §3: non c'è più un file system condiviso).
 
-## 3. La domanda importante: come fanno i worker a usare un modello da giga?
+Non serve modificare nessun altro file del repo.
 
-Risposta breve: **il modello non viene mai caricato in memoria, né sui worker né
-altrove**. Va capito il cambio di prospettiva: il modello non è un "oggetto da
-caricare", è un **dataset da leggere a pezzi** — esattamente come i dati.
+## 2 · Struttura e flusso logico
 
-Nel dettaglio:
+```
+Fase 1   silver/papers ──► filtro title_ok ──► findall + explode ──► (cord_uid, word)
+         (2 colonne su 23)                     + stop-word                  │  [persist]
+                                                                            │
+                                        parole distinte = VOCABOLARIO ◄─────┘
+                                                    │ (~10⁵ stringhe, sul driver)
+                                                    ▼
+Fase 2   model.vec (4,5 GB) ──► dd.read_csv a blocchi ──► tieni solo il vocabolario
+                                                                            │
+                        (cord_uid, word) ⋈ (word, v0..v299)  broadcast del modello
+                                                                            │
+                        groupby(cord_uid).sum() ──► ÷ n_words = MEDIA ──► Parquet
+```
 
-1. Il file `/data/model/crawl-300d-2M-subword.vec` è **testo**: 2 milioni di righe
-   `parola v1 v2 ... v300`. Sta sul volume, che i worker vedono via **NFS** allo
-   stesso path (per questo serve `cluster_storage_up.sh`).
-2. `dd.read_csv(..., blocksize="64MB")` lo spezza in **~70 blocchi da 64 MB**. Ogni
-   blocco è una task: il worker che la esegue legge via NFS **solo quel blocco**, lo
-   parsa (1 colonna stringa + 300 float32) e — prima che arrivi il blocco successivo —
-   lo **filtra**, tenendo solo le righe la cui parola compare davvero nei titoli.
-   Il picco di RAM per task è quindi ~100-150 MB, non 4.5 GB: i blocchi scartati
-   vengono liberati subito.
-3. Dei 2 000 000 di vettori ne sopravvivono solo quelli del **vocabolario dei titoli**
-   (~10⁵): è questa "fetta" (~200 MB distribuiti tra i worker) l'unica cosa che resta
-   in memoria (`persist`), ed è ciò che serve al join.
-4. Quindi: la "piccola memoria locale dei worker" che hai visto (3.8 GB) ospita solo
-   i blocchi in transito + la fetta filtrata del modello — mai il modello intero.
+Le funzioni del `.py` seguono questo ordine: `read_titles` → `tokenize` →
+`vocabulary_of` → `read_model` → `keep_vocabulary_words` → `mean_pooling`, e `build` le
+mette in fila.
 
-Nota sul file `.bin` (7.2 GB): quello sì andrebbe caricato **per intero** in RAM con
-la libreria `fasttext` (è un modello binario completo, con le subword) — impossibile
-sui nostri worker. È il motivo per cui la soluzione usa il `.vec`, che essendo testo
-riga-per-riga si presta alla lettura distribuita. Stesso approccio del gruppo dello
-scorso anno (loro con `wiki.en.vec` da 6.1 GB su worker da 4 GB).
+**Perché la media (mean pooling).** L'assignment permette sia la lista di vettori sia
+«aggregated into a single vector». La media dà un vettore di **dimensione fissa** (300)
+per ogni titolo, che è la forma che serve al 2.3.4: la cosine similarity si calcola tra
+due vettori, non tra due liste di lunghezza diversa.
 
-### Il filtro "fast-isin" (collegamento col MEMORY_LEAK_REPORT)
+**Cosa contiene l'output.** `cord_uid | n_words | v0..v299`, in Parquet zstd.
+`n_words` è quante parole del titolo hanno trovato un vettore (le altre sono saltate,
+come suggerisce l'assignment). Il **titolo non c'è**: sta in `silver/papers` a un join di
+distanza, e portarselo dietro avrebbe aggiunto uno shuffle a ogni run misurato senza
+alcuna ragione di calcolo. Il 2.3.4 lo recupera con `dd.read_parquet(papers,
+columns=["cord_uid", "title", "is_title_unique"])` — lettura colonnare, costa poco.
+`is_title_unique` gli serve davvero: 122 mila paper hanno un titolo duplicato, e le
+coppie con similarità 1 sarebbero un artefatto.
 
-Per filtrare i blocchi del modello serve un test "questa parola è nel vocabolario?"
-contro un insieme di ~10⁵ stringhe. Il report del tuo collega
-(`docs/MEMORY_LEAK_REPORT.md`) ha dimostrato — sullo stesso identico pattern, un
-`isin` contro un set da 315k stringhe — che `Series.isin(set_python)` riconverte il
-set **a ogni partizione**: lentezza (~0.7 s/task) + churn di memoria che l'allocatore
-trattiene (il famoso "leak"). La cura documentata lì è quella adottata qui:
+## 3 · La domanda importante: come fanno worker da 3,8 GB a usare un modello da 4,5 GB?
 
-- il vocabolario è convertito **una volta sola sul driver** in `pyarrow.Array`;
-- dentro ogni partizione il filtro usa il kernel vettoriale `pc.is_in`.
+**Il modello non viene mai caricato.** Il cambio di prospettiva è tutto qui: non è un
+oggetto da caricare in memoria, è **un dataset da leggere a pezzi**, esattamente come i
+dati.
 
-Dal report ho ripreso anche gli altri punti della "ricetta benchmark" (§7):
-`MALLOC_TRIM_THRESHOLD_=0` e `MALLOC_ARENA_MAX=2` impostati via
-`pre-spawn-environ` **prima** di creare il cluster (dopo non ha effetto), e la
-`sweep()` (gc + pool Arrow + `malloc_trim`) chiamata **tra** gli stage, mai dentro
-le regioni cronometrate.
+1. Il file `.vec` è **testo**: 2 milioni di righe `parola v1 v2 ... v300`.
+2. `dd.read_csv(..., blocksize="64MB")` lo taglia in ~70 blocchi. Ogni blocco è una task:
+   il worker che la esegue legge **solo quel blocco** dal proprio disco, lo parsa e —
+   prima che arrivi il successivo — lo **filtra**, tenendo solo le righe la cui parola
+   compare in qualche titolo. Il picco per task è la dimensione di un blocco, non del file.
+3. Dei 2 000 000 di vettori sopravvivono solo quelli del vocabolario dei titoli (~10⁵):
+   quella fetta (poche centinaia di MB, distribuita) è l'unica cosa che resta in memoria.
 
-## 4. Benchmark: cosa misura e come si usa
+Il file `.bin` da 7,2 GB **non si usa**: quello sì andrebbe caricato tutto in RAM dalla
+libreria `fasttext`, ed è impossibile sui nostri worker. Il `.vec`, essendo testo riga per
+riga, si presta alla lettura distribuita.
 
-- Ogni stage è cronometrato (`timings`) e campionato con **`MemorySampler`**
-  (memoria dell'intero cluster nel tempo, una curva per stage).
-- **Tutti gli output finiscono sul volume**, mai nel repo, in una cartella che
-  incorpora automaticamente il numero di worker rilevato dal client:
-  ```
-  /data/output_2.3.3/
-  ├── run_2workers/
-  │   ├── embeddings/          # il risultato (Parquet, 8 parti)
-  │   ├── timings.csv          # tempi per stage
-  │   ├── summary.json         # metadati del run (coverage, dimensioni, config)
-  │   └── memory_usage.png     # memoria del cluster per stage
-  └── scaling_workers.png      # confronto tra i run (generato dalla cella §10)
-  ```
-- **Per misurare lo scaling**: esegui il notebook com'è (2 worker) → poi togli un IP
-  da `cluster.txt`, riavvia il kernel e riesegui → nasce `run_1workers/` accanto a
-  `run_2workers/`. La cella §10 raccoglie tutti i `timings.csv` presenti e produce il
-  grafico a barre tempo-per-stage vs n. worker. Se in futuro aggiungete una VM, basta
-  aggiungere l'IP: la struttura si adatta da sola (`run_3workers/`, ...).
-- La cella §9 è un **sanity check** qualitativo: due titoli sul coronavirus devono
-  avere similarità coseno nettamente più alta di una coppia scorrelata.
+> ⚠️ **Serve su ogni worker, allo stesso path.** Con l'architettura attuale non c'è più
+> né volume né NFS: ogni macchina legge dal proprio disco. Se il modello sta solo sullo
+> scheduler, i worker falliscono con `FileNotFoundError` — ed è per questo che il `.py`
+> controlla che il file esista e lo dice esplicitamente.
 
-## 5. Cose da sapere / limiti
+### Il filtro, e il collegamento col MEMORY_LEAK_REPORT
 
-- **`cluster.txt` sulla VM è vecchio** (l'ho verificato: contiene
-  `10.67.22.205,224,113,234,100`): va sostituito con la riga del §1 punto 2, altrimenti
-  `SSHCluster` prova a collegarsi a macchine che non esistono più.
-- Il notebook è **idempotente**: rieseguire la cella del cluster chiude il precedente;
-  rieseguire il run sovrascrive la stessa `run_Nworkers/` (`overwrite=True`).
-- Se `cluster.txt` non c'è (es. prova locale), parte un `LocalCluster` di fallback.
-- La copertura attesa non è il 100%: titoli senza parole nel modello (es. titoli non
-  inglesi) non producono un embedding; i numeri esatti finiscono in `summary.json`
-  (`titles_coverage`, `token_coverage`).
-- Il modello contiene anche parole con maiuscole; noi tokenizziamo da `title_norm`
-  (minuscolo), quindi facciamo match solo con le entrate minuscole del modello — è la
-  scelta standard e coerente col pre-processing del silver.
+Il filtro fa una domanda ripetuta ~70 volte: *"questa parola sta nel vocabolario?"*,
+contro un insieme di ~10⁵ stringhe. Scritto nel modo ovvio —
+`block["word"].isin(insieme_python)` — pandas **riconverte l'insieme in formato Arrow a
+ogni blocco**: stesso risultato, ma secondi di lavoro GIL-bound per task e una montagna di
+oggetti temporanei che l'allocatore poi trattiene. È **esattamente** l'hotspot
+root-causato in `docs/MEMORY_LEAK_REPORT.md` (lì valeva ~170×).
+
+La cura, adottata qui: il vocabolario è convertito **una volta sola sul driver** in
+`pyarrow.Array`, e ogni blocco è filtrato col kernel vettoriale `pc.is_in`.
+
+Dal report viene anche il resto della ricetta, che però sta già in `cluster.py` e vale per
+tutti i task: `MALLOC_TRIM_THRESHOLD_=0` e `MALLOC_ARENA_MAX=2` impostate **prima** che
+nasca un worker.
+
+### L'altra scelta che riguarda la memoria: il broadcast del join
+
+Dopo il join ogni riga `(paper, parola)` porta **300 float**. Un join normale rimescola
+entrambi i lati per chiave `word`: sul corpus intero sono svariati GB che attraversano la
+rete, e per giunta sparpaglia le parole di uno stesso paper su partizioni diverse, così il
+`groupby` che segue non ha più niente da ridurre localmente.
+
+Mandando invece il modello filtrato (piccolo) a tutti i worker, il join diventa locale, i
+titoli restano partizionati come sono stati letti, e il `groupby` può sommare le parole di
+un paper **dentro la partizione** prima che qualcosa si muova. È lo stesso identico trucco,
+per la stessa ragione, del join prefer-pmc della conversione (`PROJECT_CONTEXT.md` §7,
+Atto 1, dove un `merge` fu riscritto come broadcast). `--no-broadcast` resta come manopola
+perché la differenza tra i due vale la pena di essere misurata.
+
+## 4 · Benchmark
+
+Stesso metodo della campagna del word count, così i risultati stanno nella stessa
+relazione: **una riga del CSV = una misura = un cluster nuovo**, e ogni punto è il
+riferimento con **una sola manopola cambiata**. Ogni misura parte da worker appena nati,
+perché su questo cluster un worker che ha già macinato milioni di stringhe trattiene RSS
+per frammentazione: riusandolo, la misura sommerebbe il partizionamento e l'usura.
+
+Le manopole sono cinque — le prime due sono le due **larghezze** del grafo:
+
+| manopola | cosa cambia | il confine |
+|---|---|---|
+| `partizioni` | in quante parti si tagliano i **titoli** | poche partizioni = task grosse = picco di RAM |
+| `blocksize` | in che blocchi si legge il **modello** | idem, sul lato modello |
+| `worker` | quanti **processi** | speedup ed efficienza |
+| `thread` | quanti task **dentro** lo stesso processo | GIL + memoria condivisa nel worker |
+| `split_out` | quanto è larga la **coda** del Reduce | `split_out=1` = una task tiene tutto |
+
+più un punto singolo, `broadcast`, che confronta le due strategie di join.
+
+Si misurano **due** cose per ogni punto: i **secondi** e il **picco di RAM del worker più
+carico** (`picco_gb`, da `ru_maxrss`, lo stesso strumento di `Giulia/misura_ram.py`). Il
+picco non è un extra: è quello che decide se una configurazione completa o muore con
+`KilledWorker`, e sulle curve del word count è la metà della storia.
+
+Le ripetizioni (`--ripetizioni 3`) sono **passate intere**, non tre misure di fila dello
+stesso punto: fra due ripetizioni passano ore, quindi la dispersione comprende la
+variabilità della macchina nella giornata. E se la campagna si interrompe, quello che resta
+in mano è una campagna completa invece di mezza curva misurata tre volte.
+
+**Dove finisce tutto** (fuori dalla repo, che sul cluster è usa-e-getta):
+
+```
+~/mapd-out/title_embeddings/embeddings/     il risultato (Parquet, sui dischi dei worker)
+~/mapd-out/bench-embeddings/misure.csv      una riga per misura  <- QUESTO va scaricato
+~/mapd-out/bench-embeddings/report_*.html   una dashboard Bokeh per ogni misura
+~/mapd-out/title_embeddings/bench_*.png     i grafici, generati dal notebook
+```
+
+Il notebook (§8) legge `misure.csv` e disegna, per ogni manopola, tempo e picco di RAM
+affiancati.
+
+## 5 · Cose da sapere / limiti
+
+- **L'output degli embedding è distribuito**: lo scrivono i worker, ognuno sul proprio
+  disco, quindi la cartella sulla macchina scheduler resta **vuota**. È il motivo del
+  `client.run(os.makedirs, ...)` nel `.py`. Quello che va scaricato sul portatile prima di
+  spegnere le VM è il **CSV delle misure** e i grafici, che sono pochi MB; gli embedding
+  veri servono al 2.3.4 e conviene tenerli dove sono finché quel task non gira.
+- **La pipeline non è interamente pigra**: il vocabolario deve esistere sul driver prima
+  che il modello si possa filtrare, quindi c'è una prima passata sui titoli che non si può
+  fondere con la seconda. Il cronometro del benchmark le comprende entrambe, perché è
+  quello che si consegna.
+- **La copertura non è il 100%**: un titolo le cui parole non stanno nel modello (tipico
+  dei titoli non inglesi) non produce un vettore. Il numero esatto lo stampa il `.py`.
+- **Le stop-word sono solo inglesi.** È una scelta già registrata in `DECISIONI.md` come
+  limite noto e comune ai task; la direzione decisa è dare a tedesco, francese, spagnolo e
+  portoghese le loro liste, dopo i benchmark.
+- **`title_embeddings.py` non importa niente del repo a livello top**, e non è un vezzo:
+  viene spedito ai worker con `upload_file` e deve essere importabile **da solo**
+  (`PROJECT_CONTEXT.md` §8.12a). `from cluster import get_client` sta dentro `main()`.
+- La pipeline è stata **verificata numericamente in locale** su un dataset finto: la media
+  distribuita coincide con quella calcolata a mano in pandas (`atol 1e-5`), e le due
+  strategie di join danno lo stesso risultato riga per riga.
