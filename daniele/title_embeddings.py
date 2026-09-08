@@ -27,6 +27,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pyarrow as pa
+import dask
 import dask.dataframe as dd
 
 # NOTHING outside the standard library, Dask and the array libraries is imported here,
@@ -370,15 +371,21 @@ def main():
         print("reduce    :", f"groupby, split_out={args.split_out}"
               if args.split_out else "groupby into a SINGLE output partition")
 
-        embeddings.to_parquet(out / "embeddings", write_index=False,
-                              compression="zstd", overwrite=True)
+        # The write and the two coverage numbers are asked for TOGETHER, in one
+        # `dask.compute`: it merges the graphs, so the pipeline runs once and both
+        # consumers read the same result (the "shared computations" of the Dask lecture).
+        #
+        # The obvious alternative - write, then read the output back - CANNOT work here:
+        # the workers wrote their parts on their own disks, and the folder on this machine
+        # is empty, because no worker runs here (§8.12b). Asking the driver to read it
+        # gives "No files satisfy the parquet_file_extension criteria" AFTER a perfectly
+        # good run. Measured: 8 parts, 1.07 GB, spread over the three workers.
+        write = embeddings.to_parquet(out / "embeddings", write_index=False,
+                                      compression="zstd", overwrite=True, compute=False)
+        _, n_titles, n_matched = dask.compute(write,
+                                              embeddings["n_words"].count(),
+                                              embeddings["n_words"].sum())
         elapsed = time.perf_counter() - started
-
-        # Read back one small column to say how much of the corpus got an embedding.
-        # Cheap (columnar) and it checks the output actually exists.
-        written = dd.read_parquet(out / "embeddings", columns=["n_words"])
-        n_titles = len(written)
-        n_matched = int(written["n_words"].sum().compute())
     finally:
         client.close()
         if cluster is not None:

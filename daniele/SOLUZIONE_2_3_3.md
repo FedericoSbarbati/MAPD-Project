@@ -227,8 +227,47 @@ riscritto come broadcast. Il costo diventa **noto**: 0,2 GB per worker, una volt
 e nessuno shuffle. `--no-broadcast` resta come alternativa da manuale (join distribuito
 vero, con rimescolamento di entrambi i lati) ed è una delle manopole del benchmark.
 
-Il `.py` stampa ora quanto pesa davvero la tabella broadcastata:
-`model kept : 161,901 words, 0.20 GB to every worker`.
+Il `.py` stampa ora quanto pesa davvero la tabella broadcastata. Sul corpus intero:
+`model kept : 87,774 words, 0.11 GB to every worker` — cioè **54%** delle 161.901 parole
+dei titoli esiste nel modello, e la tabella da mandare in giro è **0,11 GB**.
+
+### Terzo atto: le statistiche non si leggono rileggendo l'output
+
+Con il broadcast a posto il calcolo è **riuscito** (8 parti, 1,07 GB, distribuite 3+3+2
+sui tre worker), ma lo script è morto subito dopo:
+
+```
+ValueError: No files satisfy the `parquet_file_extension` criteria
+```
+
+Il colpevole era la mia riga di verifica finale, che rileggeva l'output per contare
+quanti titoli avessero un embedding — **dal driver**, dove la cartella è vuota per
+progetto, perché a scrivere sono stati i worker sui propri dischi (§8.12b). Un run
+perfetto che finiva con un errore.
+
+La cura è chiedere la scrittura e le due statistiche **nello stesso `dask.compute`**:
+
+```python
+write = embeddings.to_parquet(..., compute=False)
+_, n_titles, n_matched = dask.compute(write,
+                                      embeddings["n_words"].count(),
+                                      embeddings["n_words"].sum())
+```
+
+Dask fonde i due grafi ed esegue la parte in comune una volta sola — è la "computazione
+condivisa" della Lecture 3 (`dask.compute` su più collezioni), qui usata perché è anche
+**l'unico modo corretto**: l'output non è rileggibile da dove lo si è lanciato.
+
+**Conseguenza operativa da ricordare:** per rileggere gli embedding (anche dal notebook)
+bisogna prima **raccoglierli** dai worker in un posto solo — i nomi `part.N.parquet` sono
+numerati globalmente, quindi non collidono:
+
+```bash
+mkdir -p ~/raccolta/embeddings
+for w in <ip dei worker>; do
+    rsync -a ubuntu@$w:~/mapd-out/title_embeddings/embeddings/ ~/raccolta/embeddings/
+done
+```
 
 ## 6 · Cose da sapere / limiti
 
