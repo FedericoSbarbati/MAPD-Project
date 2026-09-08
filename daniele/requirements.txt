@@ -1,12 +1,13 @@
-# Task 2.3.3 - dipendenze.
+# Task 2.3.3 - dependencies.
 #
-# TUTTE GIA' PRESENTI in ~/pyvenv su ogni macchina del cluster (verificato su scheduler
-# e worker): prima di lanciare non c'e' niente da installare. Questo file documenta le
-# versioni con cui il task e' stato scritto, e serve a ricostruire l'ambiente altrove:
+# ALL OF THEM ARE ALREADY INSTALLED in ~/pyvenv on every machine of the cluster (checked
+# on the scheduler and on both workers): there is nothing to install before launching.
+# This file documents the versions the task was written against, and is here to rebuild
+# the environment somewhere else if that is ever needed:
 #
 #     python3 -m pip install -r daniele/requirements.txt
 #
-# python sulle VM: 3.10.12
+# python on the VMs: 3.10.12
 
 dask[complete]==2026.6.0
 distributed==2026.6.0
@@ -14,6 +15,6 @@ pandas==2.3.3
 numpy==2.2.6
 pyarrow==24.0.0
 matplotlib==3.10.9
-bokeh==3.9.1        # serve a performance_report: senza, la misura fallisce a fine run
-asyncssh==2.24.0    # SSHCluster (avvio del cluster multi-nodo)
+bokeh==3.9.1        # needed by performance_report: without it the measure fails at the end
+asyncssh==2.24.0    # SSHCluster (starting the multi-node cluster)
 notebook==7.6.0
