@@ -498,3 +498,27 @@ default di `--partitions` va scelto su quei numeri: sul Mac il minimo è `k=8`, 
 «una partizione per file» è il punto **peggiore** della curva · la curva sui worker è
 misurata al default `k=192`, quindi il 2,09× è una stima per difetto e va rifatta al `k`
 scelto · sigle (`CAS`/`NIH`) e frammenti di indirizzo restano fuori: serve un dizionario.
+
+---
+## 2026-09-10 (tarda sera) — la 8786 non si libera da sola
+
+**Decisioni + perché**
+Primo tentativo di campagna 2.3.2 sul cluster: **morta al primo punto**, `OSError: [Errno 98]
+Address already in use` sulla 8786 subito dopo un run di `affiliations.py`. Chiude il thread
+aperto il 2026-08-14 («verificare che la porta 8786 si liberi fra un cluster e il
+successivo»): **non si libera da sola**, e la pausa di `bench_word_count.py` non era
+pignoleria. `bench_affiliations.py` non ce l'aveva e accendeva **12 cluster di fila senza
+respiro**: aggiunta `PAUSA_FRA_CLUSTER = 10`, stessa costante e stessa ragione. Secondo
+difetto della stessa famiglia: `get_client` stava **fuori** dal `try/except` che protegge la
+misura, quindi un cluster che non nasce si portava via l'intera campagna invece di lasciare
+righe con l'errore — ora le sue misure diventano righe `errore` e la campagna prosegue.
+
+**Collegamenti toccati**
+`Federico/bench_affiliations.py` (+`PAUSA_FRA_CLUSTER`, `except` sul ciclo dei worker) ·
+`Federico/README.md` §Benchmark (la pausa e il perché) · misurato di passaggio: il baseline
+pandas su un core della VM è **14,18 s** contro i 3,93 s del Mac — i core delle *medium*
+sono molto più lenti, da tenere presente leggendo i tempi del cluster.
+
+**Thread aperti**
+Campagna 2.3.2 sul cluster ancora da completare · resta da scegliere il `k` di default sui
+numeri del cluster · la curva sui worker è misurata al default `k=192`, il punto peggiore.

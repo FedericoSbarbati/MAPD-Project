@@ -172,7 +172,10 @@ python Federico/bench_affiliations.py ~/mapd-data/silver/authors --ripetizioni 3
 CSV = un cluster nuovo», perché un worker che ha macinato milioni di stringhe trattiene
 RSS per frammentazione glibc. Qui il job dura secondi su 34 MB: quel logoramento non può
 avvenire, mentre accendere un `SSHCluster` (~40 s) sarebbe la quasi totalità della
-campagna. Quindi **un cluster per numero di worker**, e dentro quel cluster tutte le `k`.
+campagna. Quindi **un cluster per numero di worker**, e dentro quel cluster tutte le `k`,
+con **dieci secondi di pausa fra un cluster e il successivo**: lo scheduler nasce sempre
+sulla porta 8786, e senza pausa il cluster dopo la trova occupata e non parte
+(`OSError: [Errno 98] Address already in use` — visto sul cluster vero, non ipotizzato).
 Il punto «cluster pieno, una partizione per file» appartiene a tutte e due le curve: nei
 grafici l'asse x si legge dalle **colonne di stato** (`partizioni`, `worker`), mai
 dall'etichetta `curva`.

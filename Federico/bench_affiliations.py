@@ -57,6 +57,12 @@ PARTIZIONI = (1, 2, 4, 8, 16, 32, 64, 128, None)
 COLONNE = ["curva", "valore", "ripetizione", "secondi", "errore",
            "partizioni", "file", "worker", "thread"]
 
+# Lo scheduler nasce sempre sulla porta 8786 (cluster.py), quindi il cluster successivo la
+# trova occupata se il precedente non l'ha ancora rilasciata: "OSError: [Errno 98] Address
+# already in use", e il cluster non nasce. Stessa pausa e stessa ragione di
+# bench_word_count.py, dove 48 misure di fila l'hanno provata.
+PAUSA_FRA_CLUSTER = 10
+
 
 def lavoro(files, k):
     """Il grafo delle quattro classifiche, identico a quello che il task consegna. Lazy."""
@@ -165,15 +171,12 @@ def main():
         # Un cluster per numero di worker. Sul cluster pieno gira anche la curva sulle
         # partizioni: il suo punto k=None e' il riferimento comune alle due curve.
         for worker in range(disponibili, 0, -1):
+            punti = ([("partizioni", k) for k in PARTIZIONI] if worker == disponibili
+                     else [("worker", worker)])
             client = cluster = None
             try:
                 client, cluster = get_client(repo_root=REPO, n_workers=worker)
                 client.upload_file(str(CODICE))
-
-                if worker == disponibili:
-                    punti = [("partizioni", k) for k in PARTIZIONI]
-                else:
-                    punti = [("worker", worker)]
 
                 for curva, valore in punti:
                     k = valore if curva == "partizioni" else None
@@ -185,11 +188,23 @@ def main():
                           f"worker={riga['worker']} thread={riga['thread']} "
                           f"partizioni={riga['partizioni']} -> "
                           f"{riga['secondi']} s {riga['errore']}")
+
+            # Un cluster che non nasce non deve portarsi via la campagna: le sue misure
+            # diventano righe con l'errore, e si passa al punto dopo.
+            except Exception as errore:
+                detto = f"{type(errore).__name__}: {errore}"[:200]
+                for curva, valore in punti:
+                    scrivi_riga(percorso_csv,
+                                {"curva": curva, "valore": valore or len(files),
+                                 "ripetizione": ripetizione, "secondi": None,
+                                 "errore": detto, "file": len(files), "worker": worker})
+                print(f"[{ripetizione}] worker={worker}: CLUSTER FALLITO  {detto}")
             finally:
                 if client is not None:
                     client.close()
                 if cluster is not None:
                     cluster.close()
+                time.sleep(PAUSA_FRA_CLUSTER)   # la 8786 deve tornare libera
 
     print(f"\ncampagna finita in {(time.perf_counter() - inizio) / 60:.1f} minuti")
     print("csv:", percorso_csv)
