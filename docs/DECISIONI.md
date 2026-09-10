@@ -156,10 +156,12 @@ riscrivi qui.
   il muro è a `k=32` con un thread, l'espansione si ferma a ~13,8×, e quattro thread
   moltiplicano il picco per 1,57 e non per 4 perché non capitano insieme.*
   → `Giulia/misura_ram.py`, `SETUP_CLOUDVENETO.md` §6
-- **Una riga del CSV = una misura = un cluster nuovo.** Non è pignoleria: un worker che ha
-  già macinato milioni di stringhe trattiene RSS per frammentazione glibc, quindi riusando
-  un cluster per nove punti l'ultimo misurerebbe partizionamento **più** usura.
-  → `PROJECT_CONTEXT.md` §7 Atto 3
+- **Una riga del CSV = una misura = un cluster nuovo,** dove il logoramento esiste: un
+  worker che ha già macinato milioni di stringhe trattiene RSS per frammentazione glibc,
+  quindi riusando un cluster per nove punti l'ultimo misurerebbe partizionamento **più**
+  usura. Su un job da secondi e 34 MB (2.3.2) quel logoramento non può avvenire e
+  l'accensione dominerebbe la campagna: là si usa **un cluster per numero di worker**.
+  *Qualificata il 2026-09-10.* → `PROJECT_CONTEXT.md` §7 Atto 3, `Federico/README.md`
 - **Le ripetizioni sono PASSATE INTERE della campagna** (`--ripetizioni N`), non misure
   consecutive dello stesso punto. Costa uguale e dice di più: fra due ripetizioni dello
   stesso punto passano ore, quindi la dispersione comprende la variabilità della macchina
@@ -430,3 +432,32 @@ sanificazione invariata dal commit precedente — un run locale da 15 min chiude
 (tetto netto, thread ×1,57 e non ×4) · `bench-8x1`/`16x1` sono una passata sola e la loro
 colonna `worker` dice 5 · perché `scheduler_info()` sotto-conti resta ignoto, curato non
 capito.
+
+---
+## 2026-09-10
+
+**Decisioni + perché**
+2.3.2 riscritto distribuito in `Federico/` (DataFrame, come suggerisce il testo): legge
+`silver/authors` e **rifà da sé il rollup per paper** — quel raggruppamento è una decisione
+di analisi, e i rollup `paper_countries`/`paper_institutions` diventano il **controllo**
+(284.042 / 517.911 coppie, identiche, gratis a ogni run perché sono la somma della colonna).
+`value_counts` in **una** partizione: 206 paesi e 10⁵ istituti non sono i 6M di parole del
+2.3.1, che lì avevano imposto `split_out=16`. **Misurato: questo task sta sotto la soglia in
+cui distribuire paga** — 34 MB, e la curva sulle partizioni *cresce* (k=4: 0,44 s → k=192:
+12,35 s, ×28), 4 worker rendono 2,00× ma sull'overhead, e il punto migliore di Dask è
+comunque **1,7× più lento di pandas su un core** (0,27 s). Si consegna come risultato.
+
+**Collegamenti toccati**
+`Federico/affiliations.py` (nuovo) ← `cluster.py` → `Federico/bench_affiliations.py`
+(nuovo) → `misure.csv` · `Federico/README.md` coi numeri · `DATA_DICTIONARY.md` (riga
+2.3.2 e le due sezioni rollup: ora dicono che il task le ricalcola e ci si verifica) ·
+`CLAUDE.md` mappa (+`Federico/`, `Giulia/old/` non è più l'unica versione del 2.3.2) ·
+**qualificata in Parte A** la riga «una riga del CSV = un cluster nuovo»: vale dove il
+logoramento glibc esiste, non su un job da secondi · banco di prova §8.12c passato
+(scheduler+worker fuori dal repo: `upload_file` regge, nessun `ModuleNotFoundError`).
+
+**Thread aperti**
+Il default di `--partitions` va scelto **sul cluster vero**, non sul Mac (là il minimo è
+k=4, ma con 4 macchine meno partizioni che worker lascia qualcuno fermo) · campagna mai
+girata su Cloud Veneto · nessun notebook per il 2.3.2 · il fondo classifica degli istituti
+resta rumore di normalizzazione (68,4% singleton), documentato e non curato.

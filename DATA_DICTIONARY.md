@@ -29,15 +29,16 @@ same content, the full corpus. It is **not regenerated**: the JSON→Parquet con
 | Task | Dataset | Columns to read |
 |---|---|---|
 | 2.3.1 — word-count (body text) | `silver/paragraphs` | `cord_uid`, `text` |
-| 2.3.2 — countries & institutes | `silver/paper_countries` / `silver/paper_institutions` (per-paper) or `silver/authors` (per-author) | `country` / `institution_norm` |
+| 2.3.2 — countries & institutes | `silver/authors` — the task does its **own** per-paper rollup (that grouping is an analysis decision); the `paper_*` rollups below are its **check** | `cord_uid`, `country`, `institution_norm` |
 | 2.3.3 / 2.3.4 — title embeddings & cosine | `silver/papers` | `cord_uid`, `title`, `title_norm`, `is_title_unique` |
 
 ```python
 import dask.dataframe as dd, pandas as pd
 # task 2.3.1
 dd.read_parquet("data/silver/paragraphs", columns=["cord_uid", "text"])
-# task 2.3.2 (per-paper country counts)
-pd.read_parquet("data/silver/paper_countries").country.value_counts()
+# task 2.3.2 (per-paper country counts, rolled up by the task itself)
+a = pd.read_parquet("data/silver/authors", columns=["cord_uid", "country"]).dropna()
+a.drop_duplicates().country.value_counts()   # sums to 284,042 = len(silver/paper_countries)
 # task 2.3.3 / 2.3.4
 pd.read_parquet("data/silver/papers", columns=["cord_uid", "title", "is_title_unique"])
 ```
@@ -120,10 +121,12 @@ are 0% populated. Rows are kept even without affiliation (columns null).
 
 ## `silver/paper_countries` — 284,042 rows (rollup), distinct `(cord_uid, country_iso3, country)`
 Distinct country per paper (co-authors from the same country counted once).
-**214,799 papers.** Use for **per-paper** country counts (2.3.2).
+**214,799 papers.** Task 2.3.2 rebuilds this rollup from `silver/authors` and uses these
+284,042 pairs as a **free correctness check** (verified identical, pair by pair).
 
 ## `silver/paper_institutions` — 517,911 rows (rollup), distinct `(cord_uid, institution_norm)`
-Distinct institution per paper. **237,184 papers.** Use for per-paper institute counts.
+Distinct institution per paper. **237,184 papers.** Same role as above for task 2.3.2:
+its rollup must sum to these 517,911 pairs.
 
 ---
 
