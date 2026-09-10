@@ -125,8 +125,10 @@ Distinct country per paper (co-authors from the same country counted once).
 284,042 pairs as a **free correctness check** (verified identical, pair by pair).
 
 ## `silver/paper_institutions` — 517,911 rows (rollup), distinct `(cord_uid, institution_norm)`
-Distinct institution per paper. **237,184 papers.** Same role as above for task 2.3.2:
-its rollup must sum to these 517,911 pairs.
+Distinct institution per paper. **237,184 papers.** Same role as above for task 2.3.2 —
+but note the task groups on its **own key** (case, edge markers, leading article, accents):
+on the raw column it reproduces these 517,911 pairs, with the key it reports **517,058**.
+The 853-pair gap *is* the measured effect of that normalization (→ `Federico/README.md`).
 
 ---
 

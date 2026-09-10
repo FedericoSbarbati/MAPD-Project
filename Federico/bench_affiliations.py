@@ -81,13 +81,18 @@ def stato_cluster(client):
 
 
 def baseline_pandas(files):
-    """Lo stesso lavoro su un core solo, senza Dask: il metro di paragone."""
+    """Lo stesso lavoro su un core solo, senza Dask: il metro di paragone.
+
+    "Lo stesso" alla lettera, `chiave` compresa: se il baseline saltasse un pezzo, il
+    rapporto Dask/pandas che finisce nel README misurerebbe due lavori diversi.
+    """
     inizio = time.perf_counter()
     tabella = af.load_group([str(f) for f in files])
     for colonna in af.AFFILIAZIONI.values():
         valide = tabella[["cord_uid", colonna]].dropna(subset=[colonna])
         valide[colonna].value_counts()
-        valide.drop_duplicates()[colonna].value_counts()
+        (valide.assign(chiave=valide[colonna].map(af.chiave))[["cord_uid", "chiave"]]
+               .drop_duplicates().chiave.value_counts())
     return round(time.perf_counter() - inizio, 2)
 
 

@@ -461,3 +461,40 @@ Il default di `--partitions` va scelto **sul cluster vero**, non sul Mac (là il
 k=4, ma con 4 macchine meno partizioni che worker lascia qualcuno fermo) · campagna mai
 girata su Cloud Veneto · nessun notebook per il 2.3.2 · il fondo classifica degli istituti
 resta rumore di normalizzazione (68,4% singleton), documentato e non curato.
+
+---
+## 2026-09-10 (sera) — la chiave di raggruppamento delle affiliazioni
+
+**Decisioni + perché**
+Il 2.3.2 raggruppava sulla colonna del `silver`, che è normalizzata **leggera per scelta
+dichiarata** (`norm_institution`: NFKC, spazi, punteggiatura ai bordi) e lascia la
+disambiguazione ai task. Aggiunta `chiave()` — minuscole, via i caratteri non alfanumerici
+ai bordi (`‡ † △ ✉`), via l'articolo iniziale, accenti piegati — **perché la misura dice che
+cambia la risposta**: `The University of Hong Kong` era spezzata in **sei grafie** e passa
+dal 17° al 14° posto (1.188 paper); istituti distinti 105.967 → **100.838** (−4,8%), coppie
+517.911 → **517.058**. È il caso opposto a `is_reference_like` nel 2.3.1, tolto perché non
+muoveva la top-20. **L'etichetta consegnata è la grafia più frequente, non la chiave**, e non
+costa uno shuffle: `per_autore` si conta già sulla grafia e le due Serie si ricuciono sul
+client. Sui **paesi la chiave è un no-op misurato** (206 → 206: `country_converter` li ha già
+canonicalizzati) e si applica lo stesso, un ramo solo di codice.
+**E il benchmark si è ribaltato:** con il lavoro per riga che la correttezza richiedeva, il
+punto migliore passa da **1,7× più lento** di un core a **2,2× più veloce** (1,81 s a `k=8`
+contro 3,93 s di pandas), e la curva sulle partizioni acquista un **minimo interno** invece
+di crescere sempre. Quel che decide se distribuire paga non è la taglia del cluster ma
+**quanto lavoro c'è per riga**: qui lo abbiamo visto cambiare in diretta.
+
+**Collegamenti toccati**
+`Federico/affiliations.py` (+`chiave`, `ranking` raggruppa sulla chiave e conta la grafia,
+`classifica` ricuce sul client) → `Federico/bench_affiliations.py` (`baseline_pandas` fa
+**la stessa** cosa, chiave compresa: se saltasse un pezzo il rapporto Dask/pandas
+confronterebbe due lavori diversi) → campagna locale rifatta da zero, 3 passate ·
+`Federico/README.md` riscritto (sezione nuova sulla normalizzazione con la tabella regola
+per regola; benchmark aggiornati) · `DATA_DICTIONARY.md`: la nota su `paper_institutions`
+ora distingue le 517.911 coppie **grezze** dalle 517.058 **con la chiave**.
+
+**Thread aperti**
+Campagna sul cluster mai girata (un run singolo là: 39,6 s contro 13,4 s del Mac) · il
+default di `--partitions` va scelto su quei numeri: sul Mac il minimo è `k=8`, il default
+«una partizione per file» è il punto **peggiore** della curva · la curva sui worker è
+misurata al default `k=192`, quindi il 2,09× è una stima per difetto e va rifatta al `k`
+scelto · sigle (`CAS`/`NIH`) e frammenti di indirizzo restano fuori: serve un dizionario.

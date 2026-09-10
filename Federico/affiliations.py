@@ -6,7 +6,8 @@ usa il DataFrame di Dask.
 
     silver/authors            una riga per (paper, autore)
       |  dropna               un autore senza affiliazione non vota
-      |  drop_duplicates      (paper, entita'): un paper conta UNA volta per entita'
+      |  chiave               le grafie della stessa entita' cadono sulla stessa chiave
+      |  drop_duplicates      (paper, chiave): un paper conta UNA volta per entita'
       v  value_counts         l'unico shuffle del job
     classifica  entita' -> paper, e la stessa cosa senza il dedup -> autori
 
@@ -22,8 +23,10 @@ mai il codice (vedi cluster.py).
 """
 
 import argparse
+import re
 import sys
 import time
+import unicodedata
 from pathlib import Path
 
 import dask
@@ -39,6 +42,38 @@ COLUMNS = ["cord_uid", "country", "institution_norm"]
 
 # Le due classifiche chieste dal testo: nome dell'output -> colonna di silver/authors.
 AFFILIAZIONI = {"country": "country", "institution": "institution_norm"}
+
+
+# ----------------------------------------------------------------------------------
+# La chiave di raggruppamento
+#
+# Il silver normalizza gli istituti in modo DICHIARATAMENTE leggero (NFKC, spazi
+# collassati, punteggiatura tolta ai bordi) e lascia la disambiguazione ai task. Quello
+# che resta e' la stessa istituzione scritta in piu' modi, e non e' cosmetico: misurato
+# sul corpus, "The University of Hong Kong" e' spezzata in SEI grafie e con il
+# raggruppamento corretto passa dal 17o al 14o posto. Ogni regola qui sotto e' stata
+# aggiunta dopo averne misurato l'effetto (README).
+# ----------------------------------------------------------------------------------
+
+# I marcatori di nota che il PDF attacca al nome dell'affiliazione: ‡ † △ ✉ e simili
+BORDI = re.compile(r"^[^\w]+|[^\w]+$", re.UNICODE)
+ARTICOLO = re.compile(r"^(the|la|le|el|il)\s+", re.IGNORECASE)
+
+
+def chiave(nome):
+    """Nome di affiliazione -> chiave di raggruppamento.
+
+    Grafie diverse della stessa entita' devono cadere sulla stessa chiave:
+    1- via i caratteri non alfanumerici ai bordi (i marcatori di nota)
+    2- via l'articolo iniziale ('The University of X' = 'University of X')
+    3- minuscolo
+    4- accenti piegati: l'estrazione dal PDF perde gli accenti a intermittenza, e
+       'aix marseille universite' e' lo stesso posto di 'aix marseille universite'
+       con l'accento. NFKD separa la lettera dal segno, e i segni si scartano.
+    """
+    nome = ARTICOLO.sub("", BORDI.sub("", nome)).lower()
+    nome = unicodedata.normalize("NFKD", nome)
+    return "".join(c for c in nome if not unicodedata.combining(c))
 
 
 # ----------------------------------------------------------------------------------
@@ -93,7 +128,13 @@ def read_groups(groups):
 def ranking(authors, column):
     """Le due classifiche di una colonna di affiliazione. Lazy.
 
-    Restituisce (per_paper, per_autore), due Serie 'entita' -> conteggio'.
+    Restituisce (per_paper, per_autore):
+        per_paper    indicizzata sulla CHIAVE   quanti paper per entita'
+        per_autore   indicizzata sulla GRAFIA   quante righe-autore per grafia
+
+    Le due indicizzazioni sono diverse apposta: la chiave serve a raggruppare, la grafia
+    a ricavare l'etichetta leggibile. Cosi' l'etichetta non costa uno shuffle in piu' -
+    si ricuce sul client, dove sono 10^5 righe (vedi `classifica`).
 
     value_counts riduce in UNA partizione, e qui e' la scelta giusta: le entita' distinte
     sono 206 paesi e ~10^5 istituti, non i 6 milioni di parole del 2.3.1 che avevano
@@ -101,17 +142,28 @@ def ranking(authors, column):
     """
     valid = authors[["cord_uid", column]].dropna(subset=[column])
     per_autore = valid[column].value_counts()
-    per_paper = valid.drop_duplicates()[column].value_counts()
+    chiavi = valid.assign(chiave=valid[column].map(chiave, meta=(column, "string")))
+    per_paper = chiavi[["cord_uid", "chiave"]].drop_duplicates().chiave.value_counts()
     return per_paper, per_autore
 
 
 def classifica(per_paper, per_autore):
-    """Le due Serie gia' calcolate -> una tabella pandas ordinata per numero di paper."""
+    """Le due Serie gia' calcolate -> una tabella pandas ordinata per numero di paper.
+
+    L'etichetta consegnata e' la GRAFIA PIU' FREQUENTE della chiave, non la chiave, che
+    e' minuscola e senza accenti: 'The University of Hong Kong' resta scritto bene, e
+    vale la somma delle sue sei grafie.
+    """
     import pandas as pd
 
-    frame = pd.DataFrame({"papers": per_paper, "authors": per_autore})
-    frame.index.name = "entity"
-    return frame.sort_values(["papers", "entity"], ascending=[False, True]).reset_index()
+    grafie = per_autore.rename_axis("entity").reset_index(name="authors")
+    grafie["chiave"] = grafie["entity"].map(chiave)
+    grafie = grafie.sort_values("authors", ascending=False)   # la prima e' la piu' frequente
+    frame = grafie.groupby("chiave").agg(entity=("entity", "first"),
+                                         authors=("authors", "sum"))
+    frame["papers"] = per_paper
+    return (frame.sort_values(["papers", "entity"], ascending=[False, True])
+                 .reset_index(drop=True)[["entity", "papers", "authors"]])
 
 
 def barplot(frame, path, title):
