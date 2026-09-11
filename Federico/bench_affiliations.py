@@ -21,9 +21,25 @@ Si cronometra il calcolo delle quattro classifiche, cioe' il lavoro distribuito.
 La scrittura dei CSV e dei grafici e' pandas sul client, uguale in ogni punto: dentro il
 cronometro sarebbe una costante additiva che schiaccia le curve.
 
-Il punto "cluster pieno, una partizione per file" appartiene a TUTTE E DUE le curve:
-nei grafici l'asse x si legge dalle colonne di stato (`partizioni`, `worker`), mai
+Il punto "cluster pieno, k di riferimento" appartiene a TUTTE E DUE le curve: nei grafici
+l'asse x si legge dalle colonne di stato (`partizioni`, `worker`, `thread`), mai
 dall'etichetta `curva`.
+
+PROCESSI CONTRO THREAD, senza toccare cluster.txt. `SSHCluster` accende un worker per
+voce, quindi ripetere la lista degli host mette piu' processi sulla stessa macchina, e
+`CORD19_HOSTS` scavalca `cluster.txt` per la durata di un comando:
+
+    W=ip_worker1,ip_worker2,ip_worker3,ip_worker4
+    CORD19_HOSTS="ip_scheduler,$W,$W" CORD19_WORKER_MEMORY_LIMIT=1.7GB \
+    python Federico/bench_affiliations.py ~/mapd-data/silver/authors \
+        --only worker --worker 8 --thread 1 --k 16 --ripetizioni 3
+
+Si scrive "$W,$W" e non "w1,w1,w2,w2,...": cosi' i primi N host sono N macchine DIVERSE, e
+i punti intermedi della curva restano leggibili.
+`CORD19_WORKER_MEMORY_LIMIT` NON e' opzionale: il default e' una *frazione della RAM di
+sistema per worker*, quindi due worker sulla stessa macchina si impegnerebbero il 170%
+della sua memoria, e a fermarli sarebbe l'OOM killer del kernel - non la nanny di Dask,
+che crede di avere tutta la macchina per se'.
 
 Prova generale sul campione, prima di occupare il cluster:
 
@@ -53,6 +69,8 @@ DEFAULT_OUT = "~/mapd-out/bench_2_3_2"         # fuori dalla repo
 # I 192 file di silver/authors raggruppati in k partizioni. `None` = una per file, che e'
 # il default del task e il punto di riferimento comune alle due curve.
 PARTIZIONI = (1, 2, 4, 8, 16, 32, 64, 128, None)
+
+CURVE = ("partizioni", "worker")
 
 COLONNE = ["curva", "valore", "ripetizione", "secondi", "errore",
            "partizioni", "file", "worker", "thread"]
@@ -125,6 +143,33 @@ def misura(client, files, k, base):
     return riga
 
 
+def campagna(disponibili, k_riferimento, thread, curve=None, quali_worker=None):
+    """Le FORME DI CLUSTER da accendere, e cosa misurare dentro ciascuna.
+
+    -> {(worker, thread): [(curva, k), ...]}
+
+    Il raggruppamento e' il punto: un cluster si accende UNA volta e ci si misurano dentro
+    tutte le sue k. La curva sulle partizioni gira sul cluster pieno; la curva sui worker
+    tiene k fisso al riferimento e cambia il numero di processi.
+
+    Il punto (cluster pieno, k di riferimento) appartiene a tutte e due le curve, ed e' il
+    perno su cui si leggono insieme: nei grafici l'asse x va letto dalle colonne di stato
+    (`partizioni`, `worker`, `thread`), mai dall'etichetta `curva`.
+    """
+    punti = [("partizioni", disponibili, thread, k) for k in PARTIZIONI]
+    punti += [("worker", w, thread, k_riferimento) for w in range(disponibili, 0, -1)]
+
+    if curve:
+        punti = [p for p in punti if p[0] in curve]
+    if quali_worker:
+        punti = [p for p in punti if p[1] in quali_worker]
+
+    forme = {}
+    for curva, worker, thread_, k in punti:
+        forme.setdefault((worker, thread_), []).append((curva, k))
+    return forme
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("input", nargs="?", default=DEFAULT_INPUT,
@@ -135,6 +180,24 @@ def parse_args():
                              "ripetizioni sono passate intere e non misure consecutive "
                              "dello stesso punto: la dispersione che ne esce comprende "
                              "anche la variabilita' della macchina nel tempo")
+    parser.add_argument("--k", type=int, metavar="N",
+                        help="le partizioni della curva sui worker (default: una per "
+                             "file). E' il punto di lavoro a cui si misura lo speedup: "
+                             "misurarlo dove il job e' fatto solo di coordinamento da "
+                             "una stima per difetto")
+    parser.add_argument("--thread", type=int, metavar="N",
+                        help="thread per worker (default: quanti core ha il nodo). Con "
+                             "--thread 1 la stessa campagna misura i PROCESSI invece dei "
+                             "thread: piu' thread nello stesso processo condividono il "
+                             "GIL, piu' processi no")
+    parser.add_argument("--only", nargs="+", metavar="CURVA", choices=CURVE,
+                        help=f"rilancia solo queste curve: {' '.join(CURVE)} "
+                             "(default: tutte)")
+    parser.add_argument("--worker", nargs="+", type=int, metavar="N",
+                        help="misura solo questi numeri di worker, invece di tutta la "
+                             "curva. Serve ai confronti a core costanti, dove i punti "
+                             "intermedi distribuirebbero i processi in modo sbilanciato "
+                             "fra le macchine")
     return parser.parse_args()
 
 
@@ -153,11 +216,22 @@ def main():
         raise SystemExit(f"Nessun file .parquet in {source}")
 
     disponibili = available_workers(REPO)
+    forme = campagna(disponibili, args.k, args.thread, args.only, args.worker)
+    if not forme:
+        raise SystemExit("La selezione non contiene nessuna misura: controlla --only e --worker")
+
+    def etichetta(curva, k, worker):
+        """Il valore che finisce in colonna `valore`: la k per la curva sulle partizioni,
+        il numero di worker per quella sui worker."""
+        return (k or len(files)) if curva == "partizioni" else worker
+
     print(f"input   : {source}  ({len(files)} file)")
     print(f"csv     : {percorso_csv}  (in append)")
     print(f"worker  : fino a {disponibili}")
-    print(f"campagna: {len(PARTIZIONI)} partizioni + {disponibili - 1} worker, "
-          f"x{args.ripetizioni} passate")
+    print(f"campagna: {len(forme)} cluster x {args.ripetizioni} passate")
+    for (w, t), punti in forme.items():
+        print(f"  worker={w} thread={t or 'default'} -> "
+              f"{', '.join(f'{c}:{k or len(files)}' for c, k in punti)}")
 
     inizio = time.perf_counter()
 
@@ -168,19 +242,17 @@ def main():
                                    "file": len(files), "worker": 1, "thread": 1})
         print(f"\n[{ripetizione}] pandas, un core: {secondi} s")
 
-        # Un cluster per numero di worker. Sul cluster pieno gira anche la curva sulle
-        # partizioni: il suo punto k=None e' il riferimento comune alle due curve.
-        for worker in range(disponibili, 0, -1):
-            punti = ([("partizioni", k) for k in PARTIZIONI] if worker == disponibili
-                     else [("worker", worker)])
+        # Un cluster per FORMA (worker x thread): si accende una volta e ci si misura
+        # dentro tutto quello che quella forma deve dare.
+        for (worker, thread), punti in forme.items():
             client = cluster = None
             try:
-                client, cluster = get_client(repo_root=REPO, n_workers=worker)
+                client, cluster = get_client(repo_root=REPO, n_workers=worker,
+                                             n_threads=thread)
                 client.upload_file(str(CODICE))
 
-                for curva, valore in punti:
-                    k = valore if curva == "partizioni" else None
-                    base = {"curva": curva, "valore": valore or len(files),
+                for curva, k in punti:
+                    base = {"curva": curva, "valore": etichetta(curva, k, worker),
                             "ripetizione": ripetizione}
                     riga = misura(client, files, k or len(files), base)
                     scrivi_riga(percorso_csv, riga)
@@ -190,12 +262,12 @@ def main():
                           f"{riga['secondi']} s {riga['errore']}")
 
             # Un cluster che non nasce non deve portarsi via la campagna: le sue misure
-            # diventano righe con l'errore, e si passa al punto dopo.
+            # diventano righe con l'errore, e si passa alla forma dopo.
             except Exception as errore:
                 detto = f"{type(errore).__name__}: {errore}"[:200]
-                for curva, valore in punti:
+                for curva, k in punti:
                     scrivi_riga(percorso_csv,
-                                {"curva": curva, "valore": valore or len(files),
+                                {"curva": curva, "valore": etichetta(curva, k, worker),
                                  "ripetizione": ripetizione, "secondi": None,
                                  "errore": detto, "file": len(files), "worker": worker})
                 print(f"[{ripetizione}] worker={worker}: CLUSTER FALLITO  {detto}")

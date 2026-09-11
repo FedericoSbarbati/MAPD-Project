@@ -184,6 +184,41 @@ Si cronometra il calcolo delle quattro classifiche, cioè il lavoro distribuito.
 scrittura di CSV e grafici è pandas sul client ed è identica in ogni punto: dentro il
 cronometro sarebbe una costante additiva che schiaccia le curve.
 
+| opzione | a cosa serve |
+|---|---|
+| `--ripetizioni N` | N passate **intere** della campagna, non N misure di fila dello stesso punto |
+| `--k N` | le partizioni a cui si misura la curva sui worker (default: una per file) |
+| `--thread N` | thread per worker. Con `--thread 1` la stessa campagna misura i **processi** |
+| `--only CURVA` | `partizioni` o `worker` |
+| `--worker N …` | solo questi numeri di worker, invece di tutta la curva |
+
+### Processi contro thread, senza toccare `cluster.txt`
+
+`SSHCluster` accende **un worker per voce** nella lista degli host, quindi ripetere la
+lista mette due processi sulla stessa macchina; e `CORD19_HOSTS` scavalca `cluster.txt`
+per la durata di un comando, senza lasciare niente da rimettere a posto.
+
+```bash
+W=ip_worker1,ip_worker2,ip_worker3,ip_worker4
+CORD19_HOSTS="ip_scheduler,$W,$W" CORD19_WORKER_MEMORY_LIMIT=1.7GB python Federico/bench_affiliations.py ~/mapd-data/silver/authors     --only worker --worker 8 --thread 1 --k 16 --ripetizioni 3
+```
+
+Si scrive `"$W,$W"` e non `w1,w1,w2,w2,…`: così i primi *N* host sono *N* macchine
+**diverse**, e i punti intermedi della curva non finiscono con i processi ammucchiati su
+metà cluster. **`CORD19_WORKER_MEMORY_LIMIT` non è opzionale:** il default è una *frazione
+della RAM di sistema per worker*, quindi due worker sulla stessa macchina si
+impegnerebbero il 170% della sua memoria, e a fermarli sarebbe l'OOM killer del kernel —
+non la nanny di Dask, che crede di avere la macchina tutta per sé. Su una *medium* da
+4 GB, 1,7 GB è la metà dei 3,5 che prende un worker solo.
+
+**L'ipotesi, scritta prima di misurare.** Il lavoro per riga è `re.sub` + `lower()` in
+Python puro: il **GIL** — il lucchetto che lascia eseguire bytecode Python a un solo
+thread per processo alla volta — non viene rilasciato da nessuno dei due. La lettura
+Parquet invece sì, perché Arrow è C++. Quindi mi aspetto che i processi battano i thread,
+ma **meno nettamente del 2.3.1**, dove il Map era interamente Python e i thread arrivarono
+a *rallentare* (`T(4)/T(1) = 1,31`). Se `8×1` batte `4×2` a parità di otto core, la causa
+è il GIL; se pareggiano, il collo di bottiglia è altrove.
+
 ### I risultati sul Mac (`LocalCluster`, 4 worker × 3 thread, corpus completo)
 
 Tre passate intere della campagna, dispersione fra 1,1% e 5,2%.
