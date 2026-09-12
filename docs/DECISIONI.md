@@ -617,3 +617,76 @@ filtrare i titoli duplicati (28,0 % del corpus) e quelli con `n_words ≤ 1-3` (
 tre titoli tedeschi di cui il modello conosce solo `"der"` risultano **identici al 100 %** · il
 2.3.4 non ha notebook · su `SSHCluster` resta da verificare che `pre-spawn-environ` porti davvero
 le variabili BLAS sui nodi.
+
+---
+## 2026-09-12 — la campagna del 2.3.4: i thread funzionano, e le macchine contano più dei core
+
+**Decisioni + perché**
+Campagna chiusa sul cluster (5 × `large`, 100.000 titoli, **6 passate + calibrazione + un
+comando a core costanti, 85 misure**). Tre decisioni e due difetti trovati misurando.
+**(1) `DEFAULT_BLOCKS = 32`**, e *non* perché sia più veloce: su `k=16` guadagna il 3,4% a
+**2,1 σ**, che da solo non deciderebbe niente. Decide il **picco per task, 4× più basso**
+(0,12 GB contro 0,47), perché a 100.000 titoli `k=8` e `k=4` sfondano — `KilledWorker` su tutti
+e quattro i worker, e la riga di `k=4` registra `worker=3` perché il cluster non si era ancora
+ripreso. Il default costa uguale e sta **due passi** dal muro invece di uno. Curva: `k=16`
+21,70 · **`k=32` 20,98** · `k=64` 23,38 · `k=128` 38,16 (1,82× il minimo: 8.256 task in cui il
+calcolo non copre lo scheduling). Le due salite hanno **due cause diverse** — memoria a
+sinistra, scheduling a destra — non una sola forma a U.
+**(2) L'IPOTESI SUI THREAD È CONFERMATA, e cambia il quadro del progetto.** Il secondo thread
+per worker rende **1,66×** (29,67 contro 49,36 s) dove nel 2.3.2 rendeva 1,01× e nel 2.3.1
+rallentava: BLAS rilascia il GIL, e si vede. Di conseguenza il vantaggio residuo dei processi
+a core costanti si riduce a **1,15×** — ma solo il confronto **8×1 contro 4×2 sulle stesse
+quattro macchine** (25,85 ± 0,16 contro 29,67 ± 0,34, 23 σ) lo misura davvero: i due confronti
+spontanei dalle curve (`4×1` vs `1×4` = 1,56×, `4×2` vs `2×4` = 1,38×) **sono sporchi**, perché
+su questo cluster ogni worker è una macchina diversa e quei numeri confrontano quattro bus di
+memoria contro uno. Sequenza dei tre task: **2,03× → 1,33× → 1,15×**.
+**(3) Quello che scala è la MACCHINA, non il core.** Otto core su quattro macchine (25,85)
+battono **dodici core su tre** (26,88). L'efficienza si divide in due gruppi netti: ~50% con
+worker a 1 thread, ~31% con worker a 4. Il limite non è Dask né il GIL: è la **banda di
+memoria** condivisa fra i thread del nodo — coerente con la saturazione della curva thread
+(1,66× poi 1,40×) e col fatto che la *riduzione* della piastrella è memory-bound (sul Mac
+costa 3,7× la moltiplicazione). Speedup finale **4,89×** su 16 core contro un core (102,55 s).
+**PRIMO DIFETTO, trovato dalla campagna in sé stessa:** lo **stesso** punto (4 worker, 16
+thread, `k=32`) dà **20,98 ± 0,44** come punto della curva partizioni e **17,41 ± 0,71** come
+punto della curva worker — 17%, **10,5 σ**. Causa: Dask nomina i dati di `client.scatter` con
+l'**hash del contenuto**, quindi alla seconda misura dello stesso `k` nello stesso cluster i
+blocchi sono già sui worker e **il trasferimento non avviene**. Il conto torna (120 MB × 4
+worker ≈ 480 MB ≈ 3,8 s su 1 Gb/s) ed è confermato due volte: il valore *freddo* coincide nelle
+due curve che lo misurano su cluster appena nati (20,98 e 21,16), e `k=64` misurato *dopo*
+`k=32` paga comunque il suo scatter perché i suoi blocchi sono altri. **Lo speedup sui worker è
+quindi 3,66× e non 4,41×** (quest'ultimo confronta il valore caldo di 4 worker coi valori
+freddi di 3, 2, 1). In cambio quei 3,57 s **sono il costo di distribuire i dati, isolato per
+differenza**: il 17% del job a 4 worker.
+**SECONDO DIFETTO, e riguarda il risultato, non la misura: la classifica in cima NON È UNICA.**
+Ci sono **4.851 coppie sopra 0,98** e le venti consegnate valgono **tutte esattamente
+1,000000**: quali venti escano dipende dall'ordine in cui finiscono i task, e cluster e Mac
+infatti consegnano **venti coppie diverse tutte a 1,000000**. Finché duplicati e `n_words=1`
+restano dentro, «le più simili» è una domanda mal posta. Aggiunto: **due run non sono
+bit-identici** — 30 bin su 100 dell'istogramma differiscono di ±1-2 coppie con differenza
+totale **zero**, perché la somma float non è associativa e BLAS cambia l'ordine degli addendi
+con blocking, SIMD e libreria. L'**invariante di conteggio coincide alla cifra** su entrambe le
+macchine (4.999.950.000): riproducibile entro l'errore di macchina, non bit a bit.
+**Misurato di passaggio:** il baseline su un core VM è **102,55 ± 0,67 s** contro i 69,6 s del
+Mac, cioè **1,51×** e non il 3,6× del 2.3.2. Il rapporto fra due macchine non è un numero:
+dipende da cosa stanno facendo — là stringhe e regex, qui BLAS.
+
+**Collegamenti toccati**
+`nicco_scripts/` (la cartella si chiama così da oggi: i file sono stati pushati da un compagno
+e `Niccolo/` è rimasta come doppione git-ignored, **non si lancia**) · `cosine.py`
+(`DEFAULT_BLOCKS` 16 → 32, `--papers` controllato **prima** del calcolo perché sul cluster i
+dati non stanno nella repo) ← `bench_cosine.py` (`BLOCCHI` = 16, 32, 64, 128 **in
+quest'ordine**, dal riferimento verso i bordi: i `k` fragili per ultimi, altrimenti un worker
+ucciso contamina le misure successive dello stesso cluster — regola d'ordine già in vigore dal
+2.3.1, non applicata alla prima stesura; `k=8` e `k=4` **fuori** dallo sweep, li ha misurati la
+calibrazione e il muro è un fatto binario, non una misura con dispersione) ·
+`nicco_scripts/README.md` §Benchmark riscritta coi numeri del cluster · `CLAUDE.md` §4 ·
+`risultati/cosine/` (git-ignored): 85 misure, classifiche, istogramma.
+
+**Thread aperti**
+Il costo dello `scatter` a 8 worker non è misurato, quindi l'1,15× dei processi è una
+**sottostima** di entità ignota: servirebbe lo stesso punto rimisurato a caldo su 8 worker ·
+**decisione rimandata, ora urgente**: filtrare i titoli duplicati (28,0 %) e `n_words ≤ 1-3`
+(0,58 % / 4,96 %) — senza, la classifica in cima è degenere e non riproducibile · perché il
+punto a **un worker** abbia dispersione dell'8 % (70,9 → 87,2 s) contro lo 0,3-2 % di tutti gli
+altri resta **annotato e non capito** · il 2.3.4 non ha notebook · i due `.log` della campagna
+non sono stati scaricati dalla VM (il secondo `rsync` non è passato).

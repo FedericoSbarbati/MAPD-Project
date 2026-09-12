@@ -60,7 +60,12 @@ DEFAULT_TITLES = 100_000
 
 # In quanti blocchi si tagliano le righe. NON e' solo granularita' di parallelismo: e'
 # anche il picco di memoria per task, che va come (N/k)^2. Vedi `top_block`.
-DEFAULT_BLOCKS = 16
+#
+# 32 e' MISURATO sul cluster (2026-09-12, 6 passate), ma non per il tempo: su k=16 guadagna
+# il 3,4% a 2,1 sigma, che da solo non deciderebbe niente. Decide il picco per task, quattro
+# volte piu' basso (0,12 GB contro 0,47), perche' a 100.000 titoli k=8 e k=4 sfondano e
+# uccidono i worker. Il default costa uguale e sta DUE passi dal muro invece di uno.
+DEFAULT_BLOCKS = 32
 
 TOP_N = 20
 BINS = 100
@@ -102,8 +107,29 @@ def embedding_files(path):
     return sorted(Path(path).glob("*.parquet"), key=lambda f: (numero(f), f.name))
 
 
-def load_vectors(path, n_titles=DEFAULT_TITLES, seed=SEED):
+def eligible_uids(papers):
+    """I cord_uid dei paper con titolo UNICO, come array Arrow.
+
+    Convertito UNA volta qui e non per ogni file: `pc.is_in` con un `value_set` Arrow usa
+    il kernel vettorizzato, mentre un `set` Python verrebbe riconvertito a ogni partizione.
+    E' l'hotspot con nome e cognome di `docs/MEMORY_LEAK_REPORT.md` (~170x).
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    tavola = pq.read_table(papers, columns=["cord_uid", "is_title_unique"])
+    unici = tavola.filter(tavola.column("is_title_unique"))
+    return pa.array(unici.column("cord_uid").to_pylist())
+
+
+def load_vectors(path, n_titles=DEFAULT_TITLES, seed=SEED, min_words=0, unici=None):
     """Un campione di n_titles titoli -> (cord_uid, X).
+
+    `min_words` scarta i titoli di cui il modello ha riconosciuto meno di N parole:
+    a N=1 non scarta nulla (il minimo nei dati e' 1), a N=2 il 2,24%, a N=3 il 4,96%.
+    `unici` (array Arrow da `eligible_uids`) tiene solo i titoli non duplicati.
+    Entrambi sono spenti per default: sono DECISIONI DI ANALISI, e il layer silver segnala
+    senza decidere. Servono a misurare cosa cambia, non a cambiarlo di nascosto.
 
     Una QUOTA DA OGNI FILE invece dei primi n_titles: i primi 100.000 starebbero tutti
     dentro part.0, e l'ordine dei file e' quello con cui il 2.3.3 li ha scritti, non una
@@ -113,6 +139,7 @@ def load_vectors(path, n_titles=DEFAULT_TITLES, seed=SEED):
     Si legge un file per volta e si tiene solo la sua quota: il picco e' un file (146 MB),
     non il miliardo e cento dell'intera cartella.
     """
+    import pyarrow.compute as pc
     import pyarrow.parquet as pq
 
     files = embedding_files(path)
@@ -122,8 +149,18 @@ def load_vectors(path, n_titles=DEFAULT_TITLES, seed=SEED):
     for posizione, file in enumerate(files):
         quota = (posizione + 1) * n_titles // len(files) - posizione * n_titles // len(files)
         tabella = pq.read_table(file)
-        righe = min(quota, tabella.num_rows)
-        scelte = np.sort(generatore.choice(tabella.num_rows, size=righe, replace=False))
+
+        # I filtri PRIMA del campionamento: si sceglie fra i titoli ammessi, non si
+        # scartano quelli gia' scelti - altrimenti il campione si rimpicciolirebbe e i
+        # tempi non sarebbero piu' confrontabili fra una configurazione e l'altra.
+        ammessi = np.flatnonzero(tabella.column("n_words").to_numpy() >= min_words)
+        if unici is not None:
+            tenere = pc.is_in(tabella.column("cord_uid"), value_set=unici).to_numpy(
+                zero_copy_only=False)
+            ammessi = ammessi[tenere[ammessi]]
+
+        righe = min(quota, len(ammessi))
+        scelte = np.sort(generatore.choice(ammessi, size=righe, replace=False))
 
         uid.append(np.asarray(tabella.column("cord_uid").to_pylist())[scelte])
         blocchi.append(np.column_stack([tabella.column(c).to_numpy() for c in VETTORE])[scelte])
@@ -292,6 +329,15 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=SEED,
                         help=f"il seed del campione (default {SEED}): due run confrontabili "
                              "devono guardare gli stessi titoli")
+    parser.add_argument("--min-parole", type=int, default=0, metavar="N",
+                        help="tiene solo i titoli con almeno N parole riconosciute dal "
+                             "modello (default 0, nessun filtro). Con N=1 il vettore del "
+                             "titolo E' il vettore di quella parola, e titoli che non "
+                             "c'entrano niente risultano identici al 100%%")
+    parser.add_argument("--solo-unici", action="store_true",
+                        help="tiene solo i titoli non duplicati (is_title_unique in "
+                             "silver/papers). Il 28%% dei paper ha un titolo ripetuto, e "
+                             "quelle coppie valgono 1,0000 per costruzione")
     return parser.parse_args()
 
 
@@ -318,12 +364,17 @@ def main():
                          "Sul cluster passa --papers ~/mapd-data/silver/papers")
     out.mkdir(parents=True, exist_ok=True)
 
-    uid, X = load_vectors(source, args.titoli, args.seed)
+    unici = eligible_uids(papers) if args.solo_unici else None
+    uid, X = load_vectors(source, args.titoli, args.seed, args.min_parole, unici)
     X = normalize(X)
     coppie = len(X) * (len(X) - 1) // 2
     print("input     :", source)
     print("output    :", out)
+    print(f"filtri    : min_parole={args.min_parole}  solo_unici={args.solo_unici}")
     print(f"titoli    : {len(X):,}  ({X.nbytes / 1e6:.0f} MB)  ->  {coppie:,} coppie")
+    if len(X) < args.titoli:
+        print(f"            ATTENZIONE: chiesti {args.titoli:,}, i filtri ne lasciano "
+              f"{len(X):,}. I tempi non sono confrontabili con un run non filtrato")
 
     single_thread_blas()                       # prima che nasca qualunque worker
     client, cluster = get_client(repo_root=repo)

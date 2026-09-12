@@ -10,6 +10,7 @@ dissimilar) papers»*. Quel **«some»** è la chiave di lettura del task: non s
 | `cosine.py` | l'implementazione: funzioni pure + un `main()` per lanciarla da terminale |
 | `bench_cosine.py` | la campagna di benchmark: un comando, e scrive un CSV riga per riga |
 | `embeddings/` | l'output del 2.3.3 di Daniele (git-ignored): 8 Parquet, 969.021 titoli × 300 |
+| `notte_2_3_4.sh` | la campagna notturna del 2026-09-13: l'elenco dei comandi, non logica |
 
 Dipendenza condivisa col resto del progetto: `cluster.py` alla radice, che accende il
 cluster e stampa com'è fatto. Nessun ambiente Python separato.
@@ -170,25 +171,29 @@ l'altro estremo, i task troppo piccoli perché il calcolo copra il costo di sche
 Tre curve. Le due obbligatorie — tempo vs **partizioni** (qui: i blocchi `k`) e tempo vs
 **worker** — più una terza che in questo task **non è un contorno**.
 
-### L'ipotesi sui thread, scritta prima di misurare
+Campagna del **2026-09-12** su **5 × `cloudveneto.large`** (1 scheduler + 4 worker da 4 vCPU
+e 8 GB), 100.000 titoli, **6 passate intere** più la calibrazione. Baseline NumPy su un core:
+**103,13 ± 1,18 s**.
+
+### L'ipotesi sui thread, scritta prima di misurare — e confermata
 
 Nel 2.3.1 e nel 2.3.2 il lavoro è codice Python, il **GIL** lo mette in fila e i processi
 vincono: a parità di core `8×1` batte `4×2` di 1,33× e il secondo thread rende **1,01×**,
 cioè niente. Qui il lavoro non è Python: è una moltiplicazione dentro BLAS, che è C e
-**rilascia il GIL**. I thread dovrebbero quindi lavorare davvero in parallelo, e avere un
-vantaggio in più — condividono la memoria, quindi i vettori esistono in una copia sola
-invece che in una per processo.
+**rilascia il GIL**. I thread dovrebbero quindi lavorare davvero in parallelo.
 
-**Prova locale (Mac, 4 worker, 40.000 titoli, `k=16`):**
+| thread per worker | core | secondi | guadagno |
+|---|---|---|---|
+| 1 | 4 | 49,36 ± 0,44 | |
+| 2 | 8 | 29,67 ± 0,34 | **1,66×** |
+| 4 | 16 | 21,16 ± 0,50 | 1,40× |
 
-| thread per worker | secondi | |
-|---|---|---|
-| 1 | 4,53 | |
-| 2 | 2,55 | **1,78×** |
-| 4 | 2,21 | 2,05× |
+**Il secondo thread rende 1,66×** dove nel 2.3.2 rendeva 1,01×: l'ipotesi regge, e con
+dispersioni sotto il 2% non è un caso. Da 1 a 4 thread: **2,33×** con 4× i core — la
+saturazione (1,66 → 1,40) è coerente con un limite di banda di memoria, non di GIL.
 
-Il secondo thread rende **1,78×** dove nel 2.3.2 rendeva 1,01×. L'ipotesi regge sul Mac;
-sul cluster va rimisurata.
+Questi tre punti sono i più puliti della campagna: ognuno è la **sola** misura del proprio
+cluster, quindi nessuno eredita lo stato di quello precedente (vedi sotto).
 
 > **BLAS va messo a un thread, o la misura non significa niente.** BLAS si auto-parallelizza
 > e di default prende tutti i core: quattro worker che moltiplicano insieme sarebbero sedici
@@ -197,22 +202,149 @@ sul cluster va rimisurata.
 > `MALLOC_TRIM_THRESHOLD_`, e **senza toccare `cluster.py`**, che è condiviso fra i quattro
 > task. Verificato interrogando i worker: `OPENBLAS_NUM_THREADS=1` ci arriva.
 
-### Le altre due curve (stessa prova locale)
+### Partizioni
 
-| `k` | 4 | 8 | **16** | 32 | 64 |
-|---|---|---|---|---|---|
-| secondi | 5,52 | 2,71 | **2,22** | 2,48 | 3,49 |
-
-Minimo interno a `k=16`, che è il default del task. A `k=4` si paga il muro di memoria
-(2,5× il minimo), a `k=64` la frammentazione in task troppo piccoli.
-
-| worker | 1 | 2 | 3 | 4 |
+| `k` | 16 | **32** | 64 | 128 |
 |---|---|---|---|---|
-| secondi | 6,01 | 3,36 | 2,53 | 2,47 |
+| secondi | 21,70 ± 0,72 | **20,98 ± 0,44** | 23,38 ± 0,40 | 38,16 ± 0,69 |
 
-**2,43×** su quattro worker. Il baseline NumPy su un core è **15,51 s**, quindi il punto
-migliore (2,21 s) vale **7,0×** — ma sono numeri del Mac: valgono come prova generale, non
-come risultato. La campagna sul cluster è ancora da lanciare.
+Minimo a `k=32`, ma **il vantaggio su `k=16` è del 3,4% a 2,1 σ: da solo non deciderebbe
+niente**. Quello che decide il default è l'altro conto: a `k=32` il picco per task è
+**quattro volte più basso** (0,12 GB contro 0,47), e a 100.000 titoli `k=8` e `k=4`
+*sfondano* — `k=8` con `KilledWorker` su tutti e quattro i worker, `k=4` con il cluster che
+non si era ancora ripreso dal punto precedente (la sua riga registra `worker=3`). Il default
+è `32` perché costa uguale e sta **due passi** dal muro, non perché sia più veloce.
+
+A destra `k=128` costa **1,82×** il minimo: 8.256 task in cui il calcolo non copre più il
+costo di schedularli. Le due curve hanno quindi due cause diverse, non una sola forma a U.
+
+### Worker
+
+| worker (×4 thread) | 1 | 2 | 3 | 4 |
+|---|---|---|---|---|
+| core | 4 | 8 | 12 | 16 |
+| secondi | 76,84 ± 6,37 | 40,89 ± 0,97 | 26,88 ± 0,34 | 20,98 ± 0,44 |
+
+**3,66×** su quattro worker, cioè **92% di efficienza** sui processi. Contro un core solo:
+**103,13 / 20,98 = 4,92×** su 16 core (31% — la saturazione già vista nella curva thread).
+
+Il punto a un worker ha una dispersione dell'8% contro lo 0,3-2% di tutti gli altri
+(70,9 → 87,2 s): è sempre la stessa macchina, ed è l'unica misura in cui un solo nodo porta
+tutto il carico. Annotato, non spiegato.
+
+### Processi contro thread: il confronto pulito
+
+I due confronti che vengono spontanei dalle curve — `4×1` contro `1×4` (1,56×) e `4×2`
+contro `2×4` (1,38×) — **sono sporchi**, e vale la pena dire perché: su questo cluster ogni
+worker sta su una macchina diversa, quindi `4×1` usa quattro macchine e `1×4` una sola. Sono
+quattro bus di memoria contro uno, non processi contro thread.
+
+Il confronto pulito ha richiesto un comando in più: **8 processi da 1 thread contro 4
+processi da 2 thread**, sulle stesse quattro macchine, con gli stessi 8 core
+(`CORD19_HOSTS` raddoppiata, `--worker 8 --thread 1`).
+
+| 8 core, stesse 4 macchine | secondi |
+|---|---|
+| **8 processi × 1 thread** | **25,85 ± 0,16** |
+| 4 processi × 2 thread | 29,67 ± 0,34 |
+
+**I processi vincono 1,15×** (+3,82 s, 23 σ). Reale ma piccolo, e va confrontato col resto
+del progetto:
+
+| task | processi a core costanti | il secondo thread rende |
+|---|---|---|
+| 2.3.1 word count | 2,03× | *rallenta* |
+| 2.3.2 affiliazioni | 1,33× | 1,01× (inerte) |
+| **2.3.4 cosine** | **1,15×** | **1,66×** |
+
+È la conferma dell'ipotesi, e nella forma più interessante: i thread qui **funzionano** (il
+secondo rende 1,66× invece di niente), e di conseguenza il vantaggio residuo del processo si
+riduce a un ottavo di quello del word count. Non spariscono del tutto, e c'è una ragione per
+crederlo una **sottostima**: con 8 worker lo `scatter` replica i blocchi su otto destinazioni
+invece di quattro, quindi l'`8×1` paga più trasferimento del `4×2` — e vince comunque.
+Quantificare quella correzione richiederebbe una misura che non abbiamo (lo stesso punto
+rimisurato a caldo su 8 worker): **resta un thread aperto**, non un aggiustamento a
+posteriori.
+
+### Il quadro: le macchine contano più dei core
+
+| configurazione | core | secondi | vs 1 core | efficienza |
+|---|---|---|---|---|
+| 1 worker × 4 thread | 4 | 76,84 ± 6,37 | 1,33× | 33% |
+| 4 worker × 1 thread | 4 | 49,36 ± 0,44 | 2,08× | 52% |
+| 2 worker × 4 thread | 8 | 40,89 ± 0,97 | 2,51× | 31% |
+| 4 worker × 2 thread | 8 | 29,67 ± 0,34 | 3,46× | 43% |
+| **8 worker × 1 thread** | **8** | **25,85 ± 0,16** | **3,97×** | **50%** |
+| 3 worker × 4 thread | 12 | 26,88 ± 0,34 | 3,82× | 32% |
+| 4 worker × 4 thread | 16 | 20,98 ± 0,44 | 4,89× | 31% |
+
+Due letture che si vedono solo mettendo in fila tutto:
+
+**Otto core su quattro macchine battono dodici core su tre** (25,85 contro 26,88). Il core
+aggiunto come *thread* in un processo che ne ha già quattro rende così poco che tre macchine
+piene perdono contro due terzi di macchina in più. Quello che scala non è il core: è la
+macchina — il suo bus di memoria e la sua cache.
+
+**L'efficienza si divide in due gruppi netti:** ~50% dove i worker hanno 1 thread, ~31% dove
+ne hanno 4. Il limite non è Dask e non è il GIL (BLAS lo rilascia): è la banda di memoria,
+condivisa fra i thread dello stesso nodo. Coerente con la saturazione della curva thread
+(1,66× poi 1,40×) e con il fatto che la riduzione della piastrella — scorrere `L²` valori per
+la top-20 e l'istogramma — è **memory-bound**, non compute-bound: sul Mac costava 3,7× la
+moltiplicazione.
+
+### Il difetto che questa campagna ha trovato in sé stessa
+
+Lo **stesso** punto — 4 worker, 16 thread, `k=32` — è stato misurato due volte dentro lo
+stesso cluster, e dà due numeri diversi:
+
+| | secondi |
+|---|---|
+| come punto della curva **partizioni** (2° del suo cluster, blocchi nuovi) | 20,98 ± 0,44 |
+| come punto della curva **worker** (5° del suo cluster, `k=32` già girato) | 17,41 ± 0,71 |
+
+**3,57 s di differenza, il 17%, a 10,5 σ.** Non è rumore, ed è spiegabile: `build()` fa
+`client.scatter` dei blocchi, e Dask nomina i dati scatterati con l'**hash del contenuto**.
+Alla seconda misura dello stesso `k` i blocchi sono già sui worker, la chiave coincide e
+**il trasferimento non avviene**. Il conto torna: 120 MB di vettori replicati su 4 worker
+sono ~480 MB, che su rete interna da 1 Gb/s fanno ~3,8 s.
+
+Due conferme che è questo e non un generico "riscaldamento": il valore *freddo* di quel
+punto è identico nelle due curve che lo misurano su cluster appena nati
+(`partizioni` 20,98 ± 0,44 e `thread`×4 21,16 ± 0,50), e `k=64`, misurato *dopo* `k=32`
+nello stesso cluster, paga comunque il suo scatter perché i suoi blocchi sono altri.
+
+Conseguenze, entrambe da tenere:
+
+1. **Lo speedup sui worker è 3,66× e non 4,41×.** Quest'ultimo confronta il valore "caldo"
+   di 4 worker con i valori freddi di 3, 2 e 1 — mele e pere. Tutti i numeri di questa
+   pagina usano il valore omogeneo.
+2. **Quei 3,57 s sono il costo di distribuire i dati, isolato per differenza**: il 17% del
+   job a 4 worker. È dentro il cronometro per scelta dichiarata — è lavoro distribuito, e
+   cresce col numero di worker — e adesso si sa quanto pesa.
+
+### La campagna notturna del 2026-09-13
+
+`notte_2_3_4.sh` è l'elenco dei comandi della seconda notte — nessuna logica, solo l'ordine
+giusto — e trasforma in misure le tre domande che la prima campagna ha lasciato aperte:
+
+| esperimento | domanda | come |
+|---|---|---|
+| **1 · filtri** | la classifica in cima è degenere: i filtri la rendono unica? | 5 configurazioni di `--min-parole`/`--solo-unici`, con `--top 5000` per **contare** i pari merito |
+| **2 · scatter** | quanto costa distribuire i dati, e scala coi worker? | `--ripeti-punto 3`: la 1ª misura paga il trasferimento, le altre no. Ripetuto per 1, 2, 3, 4 e **8** worker, e per ogni `k` |
+| **3 · un worker** | la dispersione dell'8% è la macchina o l'accensione? | lo stesso punto su **ciascuna** delle 4 macchine (`CORD19_HOSTS`), 8 misure a cluster fermo × 5 cluster |
+
+L'opzione `--ripeti-punto N` serve a due e tre insieme, e la colonna `misura` del CSV è la
+chiave di lettura: `misura=0` è la prima volta che quel `k` gira in quel cluster e paga lo
+scatter, `misura>0` no. La dispersione fra le misure calde è **varianza a cluster fermo**,
+quella fra `ripetizione` diverse include l'accensione: separarle è tutto il punto.
+
+**La previsione da falsificare**, scritta prima: lo scatter deve costare ~2× a 8 worker che
+a 4, perché il traffico è proporzionale alle destinazioni, e **non** deve dipendere da `k`,
+perché i megabyte trasferiti sono gli stessi. Indizio a favore, già raccolto: sul Mac
+`misura=0` **non** è più lenta delle altre (1,12 contro 1,15 s) — su localhost non c'è rete.
+
+Durata stimata **5,1 ore** per **274 misure**, dai tempi del 2026-09-12. L'ordine va dal più
+importante al più lungo: se la notte si interrompe, le risposte 1 e 2 sono già al sicuro.
 
 ## Correttezza: verificata una volta, non a ogni run
 
@@ -263,6 +395,22 @@ titoli che non c'entrano niente risultano identici al 100 %:
 
 Tre titoli tedeschi di cui il modello inglese conosce **solo `"der"`**. Con `n_words ≤ 2`
 sono il 2,24 % dei titoli, con `n_words ≤ 3` il 4,96 %.
+
+**La classifica in cima non è unica, ed è il problema peggiore dei due.** Ci sono **4.851
+coppie sopra 0,98** e le venti consegnate valgono **tutte esattamente 1,000000**: quali venti
+escano è una scelta fra pari merito, e dipende dall'ordine in cui i task finiscono. Il run
+sul cluster e quello sul Mac consegnano infatti **venti coppie diverse, tutte a 1,000000** —
+non è un errore, è la domanda che è mal posta finché gli artefatti restano dentro.
+
+> **Due run non sono bit-identici, e non devono esserlo.** Confrontando cluster e Mac sullo
+> stesso campione (seed fisso), **30 bin su 100 dell'istogramma differiscono di ±1 o ±2
+> coppie**, con differenza totale **esattamente zero**. La somma in virgola mobile non è
+> associativa, e BLAS scambia l'ordine degli addendi secondo il blocking, la larghezza SIMD e
+> la libreria: una coppia che vale 0,28 al bit può cadere da una parte o dall'altra del
+> confine. Sono 2 coppie su 5 miliardi, ~4 × 10⁻⁹. La cosa da tenere: **l'invariante di
+> conteggio coincide alla cifra** (4.999.950.000 su entrambe le macchine), mentre le *singole*
+> classifiche degeneri no. Il calcolo distribuito è riproducibile entro l'errore di macchina,
+> non bit a bit — affermare la seconda cosa sarebbe falso.
 
 **Nessuno dei due è filtrato, per ora.** Se quelle coppie siano *il risultato* o *il rumore*
 è una decisione di analisi, e il layer `silver` segnala senza decidere

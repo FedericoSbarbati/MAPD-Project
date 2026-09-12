@@ -95,8 +95,15 @@ THREAD = (1, 2, 4)
 
 CURVE = ("partizioni", "worker", "thread")
 
-COLONNE = ["curva", "valore", "ripetizione", "secondi", "errore",
+COLONNE = ["curva", "valore", "ripetizione", "misura", "secondi", "errore",
            "titoli", "partizioni", "worker", "thread"]
+
+# `misura` e' la chiave dei due esperimenti del 2026-09-13, e va letta cosi':
+#   misura=0   PRIMA volta che quel k gira in quel cluster -> paga lo `scatter` dei blocchi
+#   misura>0   i blocchi sono gia' sui worker (Dask li nomina con l'hash del contenuto)
+# La differenza fra le due e' il COSTO DI DISTRIBUIRE I DATI, isolato per sottrazione.
+# La dispersione fra le misura>0 dello stesso cluster e' invece varianza A CLUSTER FERMO:
+# separa il rumore della macchina da quello dell'accensione.
 
 # Lo scheduler nasce sempre sulla porta 8786 (cluster.py), quindi il cluster successivo la
 # trova occupata se il precedente non l'ha ancora rilasciata: "OSError: [Errno 98] Address
@@ -159,7 +166,7 @@ def misura(client, X, k, top, base):
     return riga
 
 
-def campagna(disponibili, k_riferimento, thread, curve=None, quali_worker=None):
+def campagna(disponibili, k_riferimento, thread, curve=None, quali_worker=None, ripeti=1):
     """Le FORME DI CLUSTER da accendere, e cosa misurare dentro ciascuna.
 
     -> {(worker, thread): [(curva, k), ...]}
@@ -184,7 +191,8 @@ def campagna(disponibili, k_riferimento, thread, curve=None, quali_worker=None):
 
     forme = {}
     for curva, worker, thread_, k in punti:
-        forme.setdefault((worker, thread_), []).append((curva, k))
+        # `ripeti` misure CONSECUTIVE dello stesso punto: la prima fredda, le altre calde
+        forme.setdefault((worker, thread_), []).extend([(curva, k)] * ripeti)
     return forme
 
 
@@ -215,6 +223,18 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=cs.SEED,
                         help=f"il seed del campione (default {cs.SEED}): tutte le misure "
                              "devono guardare gli stessi titoli")
+    parser.add_argument("--ripeti-punto", type=int, default=1, metavar="N",
+                        help="misura ogni punto N volte DI FILA dentro lo stesso cluster "
+                             "(default 1). La prima misura paga lo `scatter` dei blocchi e "
+                             "le altre no, quindi la differenza isola il costo di "
+                             "distribuire i dati; e la dispersione fra le misure calde e' "
+                             "varianza a cluster fermo, che separa il rumore della macchina "
+                             "da quello dell'accensione. Colonna `misura` nel CSV")
+    parser.add_argument("--no-baseline", action="store_true",
+                        help="salta il baseline NumPy su un core. Costa ~102 s a passata ed "
+                             "e' gia' misurato dieci volte (102,55 +- 0,67 s): in una "
+                             "campagna che ripete un punto solo sarebbe la maggior parte "
+                             "del tempo")
     parser.add_argument("--only", nargs="+", metavar="CURVA", choices=CURVE,
                         help=f"rilancia solo queste curve: {' '.join(CURVE)} (default: tutte)")
     parser.add_argument("--worker", nargs="+", type=int, metavar="N",
@@ -237,7 +257,8 @@ def main():
         raise SystemExit(f"Nessun file .parquet in {source}")
 
     disponibili = available_workers(REPO)
-    forme = campagna(disponibili, args.k, args.thread, args.only, args.worker)
+    forme = campagna(disponibili, args.k, args.thread, args.only, args.worker,
+                     args.ripeti_punto)
     if not forme:
         raise SystemExit("La selezione non contiene nessuna misura: controlla --only e --worker")
 
@@ -259,11 +280,13 @@ def main():
     inizio = time.perf_counter()
 
     for ripetizione in range(args.ripetizioni):
-        secondi = baseline_numpy(X, args.k, args.top, cs.BINS)
-        scrivi_riga(percorso_csv, {"curva": "numpy", "valore": 1, "ripetizione": ripetizione,
-                                   "secondi": secondi, "errore": "", "titoli": len(X),
-                                   "partizioni": args.k, "worker": 1, "thread": 1})
-        print(f"\n[{ripetizione}] numpy, un core: {secondi} s")
+        if not args.no_baseline:
+            secondi = baseline_numpy(X, args.k, args.top, cs.BINS)
+            scrivi_riga(percorso_csv, {"curva": "numpy", "valore": 1, "misura": 0,
+                                       "ripetizione": ripetizione, "secondi": secondi,
+                                       "errore": "", "titoli": len(X),
+                                       "partizioni": args.k, "worker": 1, "thread": 1})
+            print(f"\n[{ripetizione}] numpy, un core: {secondi} s")
 
         # Un cluster per FORMA (worker x thread): si accende una volta e ci si misura dentro
         # tutto quello che quella forma deve dare.
@@ -275,13 +298,17 @@ def main():
                                              n_threads=thread)
                 client.upload_file(str(CODICE))
 
+                viste = {}
                 for curva, k in punti:
                     valore = k if curva == "partizioni" else (worker if curva == "worker"
                                                               else thread)
-                    base = {"curva": curva, "valore": valore, "ripetizione": ripetizione}
+                    indice = viste.get((curva, k), 0)
+                    viste[(curva, k)] = indice + 1
+                    base = {"curva": curva, "valore": valore, "ripetizione": ripetizione,
+                            "misura": indice}
                     riga = misura(client, X, k, args.top, base)
                     scrivi_riga(percorso_csv, riga)
-                    print(f"[{ripetizione}] {curva}={riga['valore']:<5} "
+                    print(f"[{ripetizione}] {curva}={riga['valore']:<5} misura={indice} "
                           f"worker={riga['worker']} thread={riga['thread']} "
                           f"partizioni={riga['partizioni']} -> "
                           f"{riga['secondi']} s {riga['errore']}")
@@ -293,8 +320,8 @@ def main():
                 for curva, k in punti:
                     scrivi_riga(percorso_csv,
                                 {"curva": curva, "valore": k, "ripetizione": ripetizione,
-                                 "secondi": None, "errore": detto, "titoli": len(X),
-                                 "partizioni": k, "worker": worker})
+                                 "misura": 0, "secondi": None, "errore": detto,
+                                 "titoli": len(X), "partizioni": k, "worker": worker})
                 print(f"[{ripetizione}] worker={worker}: CLUSTER FALLITO  {detto}")
             finally:
                 if client is not None:
