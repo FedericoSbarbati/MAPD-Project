@@ -1,0 +1,14 @@
+dask[complete]
+pandas
+pyarrow
+matplotlib
+bokeh
+country_converter
+asyncssh
+kagglehub
+ipykernel
+jupyterlab
+notebook
+psutil
+lz4
+zstandard

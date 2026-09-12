@@ -1,0 +1,524 @@
+# Registro delle decisioni
+
+**A cosa serve.** Le scelte di questo progetto sono state prese una volta, discusse e
+spesso **misurate**. Questo file esiste perché non vengano rimesse in discussione ogni
+volta che qualcuno — persona o agente — riapre il repo con il contesto sbagliato.
+
+**Come si usa.**
+
+- **Parte A — regole in vigore.** Cosa vale *adesso*. Una riga per decisione, il perché in
+  mezza riga, e dove sta la giustificazione completa. Si legge prima di proporre qualsiasi
+  cosa. Si aggiorna **in luogo**: se una regola cambia, si riscrive quella riga.
+- **Parte B — storico.** Cosa è stato deciso e quando. **Si appende in fondo e non si
+  riscrive mai**, nemmeno quando una decisione viene superata: serve a ricostruire il
+  ragionamento, non solo il risultato.
+
+**Regola sopra le regole:** se una decisione qui dentro ti sembra sbagliata, può darsi che
+lo sia — ma serve un **fatto nuovo** per cambiarla, non un'opinione. E se la cambi, la
+riscrivi qui.
+
+---
+
+# Parte A — Regole in vigore
+
+## Metodo di lavoro
+
+- **La semplicità è un requisito, non un gusto.** È un esercizio universitario da
+  discutere all'orale: ogni riga va saputa spiegare. La complessità che non si sa
+  giustificare è un difetto. → *Precedente costoso: `bench.py`, vedi sotto.*
+- **La documentazione si aggiorna nella stessa sessione in cui l'informazione nasce**, non
+  "dopo". Sviluppo che avanza e documentazione ferma è la causa diretta del disastro
+  `bench.py`.
+- **Ogni regola di pulizia dei dati si aggiunge dopo averne misurato la necessità**, mai
+  per abitudine o "perché si fa così". → `local/NOTES.md`
+- **Un file `.py` con le funzioni, un notebook che lo importa.** Mai codice duplicato tra i
+  due, mai `subprocess` che lancia script. Il `.py` è la fonte di verità, il notebook
+  spiega. → `Giulia/old/README.md`
+- **I notebook non si eseguono.** Si lavora da terminale, si lanciano `.py`. Niente VS Code
+  remoto, niente Jupyter sulle macchine del cluster.
+- **Il codice dev'essere spiegabile all'orale da chi lo consegna.** È il motivo per cui il
+  primo word count è stato riscritto da zero: 2.466 righe in cui l'algoritmo (~30) era
+  sepolto sotto flag, controlli difensivi e `try/except` che inghiottivano gli errori.
+  → `Giulia/old/README.md`
+
+## Dati
+
+- **Niente database server: Parquet a due layer, `bronze/` e `silver/`,** tutto keyed su
+  `cord_uid`. Un DB sarebbe un anti-pattern in un esercizio di calcolo distribuito.
+  → `PROJECT_CONTEXT.md` §2
+- **Il layer `silver` corregge errori oggettivi e AGGIUNGE FLAG; non prende decisioni di
+  analisi.** I duplicati sono segnalati, non rimossi; le reference sono segnalate, non
+  scartate; nessuna tokenizzazione. La decisione di analisi spetta al task.
+  → `PROJECT_CONTEXT.md` §4, `DATA_DICTIONARY.md`
+- **I dati non si rigenerano.** `data/` sul Mac e `~/mapd-data/silver/` sul cluster sono
+  l'output validato del run completo. Per provare la pipeline: `CORD19_SAMPLE=N`.
+- **La conversione JSON→Parquet è conclusa e non fa parte dell'assignment.** Non va
+  rieseguita, e il dump grezzo (`archive/`, il volume da 200 GB) serve solo a lei.
+- **Gli embedding precomputati di CORD-19 non si usano** — scelta esplicita: il task 2.3.3
+  chiede di calcolarli con un modello FastText. → `PROJECT_CONTEXT.md` §3
+- **Le affiliazioni si leggono solo dal ramo `pdf_json`**: nei `pmc_json` sono popolate
+  ~0%. → `PROJECT_CONTEXT.md` §3
+- **Niente conteggi assoluti negli assert.** Dump diversi danno numeri diversi; si
+  verificano garanzie strutturali (unicità, integrità referenziale, invariante prefer-pmc).
+
+## Cluster
+
+- **Un cluster per persona, non uno condiviso.** Un volume OpenStack si attacca a una sola
+  macchina, quindi condividere i dati via NFS obbligava tutti e quattro a lavorare sulla
+  stessa installazione: in quattro non è praticabile. → `PROJECT_CONTEXT.md` §5
+- **I dati si replicano su ogni macchina, non si condividono.** Il `silver/` sta sul disco
+  di ogni VM, ci arriva dall'immagine snapshot. *Costo accettato:* N copie da tenere
+  allineate; se il `silver` cambia, va rifatta l'immagine.
+- **La prima macchina fa solo da scheduler.** Ci girano già il coordinatore e il processo
+  da cui lanci; su 4 GB un worker che sfonda il tetto porterebbe giù il run intero; e i
+  benchmark si interpretano solo se i worker sono intercambiabili.
+- **Macchine tutte della stessa taglia** nello stesso cluster: 3 minimo, 4–5 di solito.
+  Mescolarle rende il più piccolo il freno di tutti e i tempi inspiegabili.
+- **Le macchine non si cancellano a fine sessione** (i risultati stanno sui loro dischi) —
+  ma i risultati si **scaricano** sul portatile. *Regola ribaltata rispetto alla fase NFS.*
+- **Niente Docker**, vincolo del corso: il cluster è reale, installato a mano.
+- **Il security group `pod-students` non si tocca mai**: è condiviso con tutto il corso.
+- **Mai una chiave privata su una VM o in chat.** Si condivide solo la parte pubblica, e
+  sempre in append (`>>`). → `SETUP_CLOUDVENETO.md` §4
+- **Niente costanti assolute di RAM o thread.** `memory_limit` è una *frazione* della RAM
+  del nodo, `nthreads` non è imposto: le VM cambiano taglia tra una sessione e l'altra e un
+  "7GB" scritto a mano su una VM da 3,8 GB viene ignorato in silenzio. → `local/NOTES.md` v6
+- **Gli host stanno in `cluster.txt`, mai nel codice.** Il file è git-ignored e si cerca
+  nella radice della repo. → `PROJECT_CONTEXT.md` §6
+- **Niente fallback silenziosi:** la configurazione del cluster si stampa sempre. Un run su
+  una macchina sola sembra un cluster lento e te ne accorgi a sessione bruciata.
+- **I percorsi relativi si risolvono sulla radice della repo**, non sulla cartella da cui
+  si lancia.
+- **Niente di prezioso dentro la repo:** i risultati vanno in `~/mapd-out/`, perché sul
+  cluster la repo si cancella e si riclona. *Decisa il 2026-08-13, non ancora applicata ai
+  default del codice.*
+
+## Analisi — task 2.3.1 (word count)
+
+- **Dask Bag, non DataFrame:** è la struttura raccomandata dal testo dell'assignment.
+- **Map/Reduce in due fasi, fedele allo spec, anche se costa 2,8×** rispetto alla riduzione
+  diretta. È l'algoritmo che il testo *definisce*; il costo è stato misurato invece che
+  subito. → `local/NOTES.md` v1
+- **L'invariante Map/Reduce è verificato una volta, non a ogni run.** Le occorrenze prima
+  e dopo la riduzione coincidono (785.753.529 sul corpus intero): il controllo vive nel
+  notebook, che è il posto di una dimostrazione. Nello script era un'opzione `--check` che
+  raddoppiava il tempo e non è mai stata la strada normale. *Deciso il 2026-08-13.*
+- **In `word_count.py` c'è UNA sola fase Map**, quella dello spec. Le due varianti da
+  esperimento (una entry per occorrenza, una per partizione) sono uscite dal file: sono i
+  bracci di una misura, e vivranno nel file del benchmark se quella misura si farà.
+  *Deciso il 2026-08-13.*
+- **Si riduce sulla PAROLA, non su `(documento, parola)`**, contando prima dentro la
+  partizione (il *combiner* del MapReduce classico). La chiave sbagliata cresce col numero
+  di documenti e fa morire il job sul 10% del corpus. → `local/NOTES.md` v4
+- **`split_out=16` è il default, non una via di fuga.** `foldby` ha una coda seriale: un
+  solo task macina il vocabolario mentre gli altri worker stanno fermi. Con `split_out` il
+  run è **4,1× più veloce su worker grandi la metà**, a parità di risultato.
+  → `local/NOTES.md` v6
+- **La tokenizzazione tiene trattini, cifre e lettere greche**, con normalizzazione NFKC e
+  rimozione del preambolo LaTeX del PMC. Con un `[a-z]+` ingenuo `covid-19` — la **seconda
+  parola del corpus** — semplicemente non esiste. → `local/NOTES.md` v2
+- **Due insiemi separati di parole ignorate:** le parole funzione della lingua e gli
+  artefatti di *questo* corpus (`et`/`al`, `fig`, `table`). **Non si tolgono parole di
+  contenuto**, nemmeno generiche come `study` o `data`: sarebbe una decisione di analisi,
+  non di pulizia. → `local/NOTES.md` v2
+- **`is_reference_like` NON si filtra più: il word count conta tutti i paragrafi del
+  `silver`.** Era l'1,90% dei paragrafi e lo 0,74% del testo, e non muoveva nessuna parola
+  nella top-20 (verificato di nuovo dopo la rimozione: stesse parole, stesso ordine).
+  Costava un'opzione da riga di comando e un ramo in due lettori diversi: una differenza
+  che non si vede non paga quel codice. La colonna resta nel `silver`.
+  *Deciso il 2026-08-13, sostituisce «si filtra per definizione» → `local/NOTES.md` v3.*
+- **Il numero di partizioni dipende dalla forma della query, non solo dai file.** Tolto il
+  filtro, la stessa cartella di 1979 file è passata da **990 a 1979** partizioni eseguite.
+  Non è un parametro: si legge dal `print` dello script prima di interpretare un
+  benchmark. → `Giulia/README.md`, `PROJECT_CONTEXT.md` §8.6
+- **Direzione scelta e non ancora realizzata:** al testo non inglese si danno le sue
+  stop-word (tedesco, francese, spagnolo, portoghese), invece di scartare quei paper.
+  → `local/NOTES.md`, "Da vedere in futuro"
+
+## Benchmark
+
+- **I benchmark si fanno sul corpus vero, non sul campione.** Sul campione una macchina
+  batte quattro, perché a quella scala il tempo è tutto overhead di coordinamento.
+  → `local/NOTES.md` v5
+- **Le curve obbligatorie sono DUE** — tempo vs numero di partizioni, tempo vs numero di
+  worker. Il testo però dice «at least», e «executors/**processing units**» si legge anche
+  come *thread*: si aggiunge quindi **una misura secca sui thread per worker** (tre punti,
+  non una curva) e **una riga sola** per il `foldby` sul cluster vero. Niente altro.
+  *Rifatti da zero il 2026-08-13, riscritti il 2026-08-14.*
+- **Il cluster dei benchmark è 5 × `cloudveneto.large`** (1 scheduler + 4 worker da 4 vCPU
+  e 8 GB, cioè 7,1 GB di `memory_limit`). **Il muro sulle partizioni lo mette la memoria
+  PER SLOT, e la soglia è NETTA:** la nanny uccide sopra `0,95 × memory_limit` = 6,74 GB, e
+  a `k=32` il worker arriva a 6,41 — ci passa sotto tre volte su tre, a `k=16` no.
+  Dimezzare la memoria per worker sposta il muro di un passo in `k` (7,1 GB → `k=32`,
+  3,4 → `128`, 1,7 → `256`), perché il picco di un task va come 1/k.
+  *Misurato il 2026-08-16 col picco per worker nel CSV. Sostituisce «sotto `k=128` il job
+  non è eseguibile, il picco è ~15× il testo, ×4 thread = 16,3 GB»: sbagliata tre volte —
+  il muro è a `k=32` con un thread, l'espansione si ferma a ~13,8×, e quattro thread
+  moltiplicano il picco per 1,57 e non per 4 perché non capitano insieme.*
+  → `Giulia/misura_ram.py`, `SETUP_CLOUDVENETO.md` §6
+- **Una riga del CSV = una misura = un cluster nuovo,** dove il logoramento esiste: un
+  worker che ha già macinato milioni di stringhe trattiene RSS per frammentazione glibc,
+  quindi riusando un cluster per nove punti l'ultimo misurerebbe partizionamento **più**
+  usura. Su un job da secondi e 34 MB (2.3.2) quel logoramento non può avvenire e
+  l'accensione dominerebbe la campagna: là si usa **un cluster per numero di worker**.
+  *Qualificata il 2026-09-10.* → `PROJECT_CONTEXT.md` §7 Atto 3, `Federico/README.md`
+- **Le ripetizioni sono PASSATE INTERE della campagna** (`--ripetizioni N`), non misure
+  consecutive dello stesso punto. Costa uguale e dice di più: fra due ripetizioni dello
+  stesso punto passano ore, quindi la dispersione comprende la variabilità della macchina
+  nella giornata e non solo quella di due run attaccati; e una giornata interrotta lascia
+  **una campagna completa** invece di mezza curva misurata tre volte. Tutto è ancorato a un
+  unico punto di riferimento (tutti i worker, `k=256`, `split_out=16`), che appartiene a
+  tutte le curve: nei grafici l'asse x si legge dalle colonne di **stato** (`partizioni`,
+  `worker`, `thread`) e non da `valore`. **Ma quelle colonne si verificano, non si
+  credono:** fino al 2026-08-16 le riempiva `client.scheduler_info()["workers"]`, che
+  **sotto-conta quando più worker stanno sulla stessa macchina** — otto worker veri, ne
+  dichiara cinque, e non si corregge né dopo un refresh né dopo `wait_for_workers`. Adesso
+  si usa `client.nthreads()`; i CSV di `bench-8x1` e `bench-16x1` restano marchiati
+  «5 worker» e vanno letti sapendolo.
+  *2026-08-16, sostituisce «riferimento ripetuto 3 volte, 1 altrove».*
+- **L'ordine della campagna è progettato per una giornata che può interrompersi:**
+  riferimento → **partizioni dal centro verso i bordi** → worker → thread → foldby. Le
+  partizioni prima dei worker perché sono la curva col minimo, e il punto a un worker solo
+  costa da solo mezz'ora; i `k` bassi in fondo perché sono i più lenti e i più fragili.
+  *2026-08-16, sostituisce l'ordine «riferimento → worker → partizioni».*
+- **La campagna non si lancia mai senza averla prima calibrata** (`--only riferimento`,
+  ~30 min): le stime dei tempi vengono da un solo dato del Mac e possono sbagliare del
+  doppio.
+- **Lo sweep sulle partizioni tiene i dati fissi**, e `k` si ottiene **raggruppando i file
+  in lettura**, non con un `repartition` a valle: quello lascerebbe la lettura sempre alla
+  stessa granularità e metterebbe nel cronometro il costo della ricucitura. Fette di corpus
+  crescenti misurano la quantità di dati, non il partizionamento.
+- **Il numero di worker si cambia accendendo un cluster nuovo** con i primi *N* host di
+  `cluster.txt`, non con `scale()`: su `SSHCluster` si può solo scendere, il che obbliga a
+  ricordarsi un ordine di esecuzione ed è già costato una campagna misurata su un worker
+  solo. Costa un minuto a punto e ogni misura parte da uno stato pulito.
+- **Si cronometra il lavoro che si consegna**, scrittura del vocabolario compresa. Il crash
+  dell'11 agosto stava proprio nella scrittura, cioè nel pezzo che il vecchio benchmark
+  saltava misurando la sola `topk`.
+- **Lo script misura, il notebook disegna.** Il `.py` scrive un CSV riga per riga; i
+  grafici stanno nel notebook. Così una campagna di ore non dipende da un notebook aperto,
+  e per rifare un grafico non si rioccupa il cluster.
+- **`performance_report` sempre con `mode="inline"`**: senza, l'HTML scarica BokehJS da un
+  CDN e resta bianco appena lo si apre senza internet — cioè dopo averlo copiato giù dal
+  cluster, che è l'unico momento in cui lo si guarda.
+
+---
+
+# Parte B — Storico
+
+---
+## 2026-08-13
+
+**Decisioni + perché**
+Architettura cluster rifatta: via NFS e volume condiviso (obbligava 4 persone su un solo
+cluster), un cluster per persona con dati replicati da snapshot su ogni macchina; VM non
+più cancellate a fine sessione perché i risultati vivono sui loro dischi; `~/mapd-out/`
+come casa dei risultati, fuori dalla repo che è usa-e-getta. Documentazione riorganizzata
+per causa dichiarata: `bench.py` è diventato ingiustificabile perché lavorava su documenti
+vecchi e su decisioni mai scritte — da qui questo registro e la regola "la documentazione
+si aggiorna nella stessa sessione".
+
+**Collegamenti toccati**
+`CLAUDE.md` (riscritto: mappa + regole + come parlare con Federico) → rimanda a
+`docs/DECISIONI.md` (nuovo) · `docs/SETUP_CLOUDVENETO.md` (ora runbook operativo) ·
+`docs/PROJECT_CONTEXT.md` (§5 riscritta, §8 estesa a 12 regole, §9 riscritta) ·
+`DATA_DICTIONARY.md` rimisurato sui dati veri (picco nel 2021 non nel 2020; 272.191 titoli
+non unici; `is_reference_like` 1,90%) → `Giulia/README.md` allineato · comando `/wrap`
+ripuntato su questo file ·
+memoria privata dell'agente ripulita (32 KB che duplicavano il repo → 5 voci che ci
+puntano; regola: se memoria e repo divergono, vince il repo).
+
+**Thread aperti**
+Rifare i benchmark da zero (priorità 1) · riscrivere il 2.3.2, oggi non distribuito ·
+applicare `~/mapd-out` ai default del codice · verificare i core per flavor sulla
+dashboard · `daniele/SOLUZIONE_2_3_3.md` cita ancora 406.211 righe per `silver/papers`
+(vere: 970.836) — **lasciato apposta**, è il documento di un compagno.
+
+---
+## 2026-08-14
+
+**Decisioni + perché**
+Impalcatura benchmark buttata (948 righe, **zero misure prodotte**) → `cluster.py` accende
+il cluster e basta, `bench_word_count.py` è una campagna sola che gira una notte da sola;
+lo script misura e scrive un CSV, il notebook disegna. `k` partizioni si ottiene
+raggruppando i file (`repartition` metterebbe la ricucitura nel cronometro) e il numero di
+worker accendendo un cluster nuovo coi primi *N* host (su `SSHCluster` `scale()` scende e
+basta, e obbliga a ricordare un ordine). Da `word_count.py` tolti `--check`, il filtro
+`is_reference_like` (top-20 identica) e i due Map da esperimento: erano bracci di misure
+mai eseguite. **Regole sostituite in Parte A:** invariante opt-in, `is_reference_like` "si
+filtra per definizione", "`bench.py` in revisione", sweep partizioni via `repartition`.
+
+**Collegamenti toccati**
+`cluster.py` (ex `bench.py`, +`available_workers`) ← `word_count.py` e
+`bench_word_count.py` → CSV in `~/mapd-out/bench/` → `word_count.ipynb` §9, che ora
+disegna (grafici usciti dall'impalcatura) · README, PROJECT_CONTEXT §2/§8.6/§9,
+DATA_DICTIONARY, CLAUDE.md allineati.
+
+**Thread aperti**
+Lanciare la campagna sul cluster (mai misurato per davvero: solo campione) · verificare
+che la porta 8786 si liberi fra un cluster e il successivo (pausa 10 s, non provata su
+SSH) · misurato: `word_count.py` calcolava tutto **due volte**, risolto con `persist()` ·
+partizioni passate da 990 a 1979 togliendo il filtro — dipendono dalla forma della query ·
+2.3.2 ancora non distribuito.
+
+---
+## 2026-08-14 (sera) — il disegno della campagna, e il codice che lo esegue
+
+**Decisioni + perché**
+Letti i flavor veri dalla dashboard: **medium = 2 core, large = 4, xlarge = 8** (chiude la
+domanda aperta in `SETUP` §6). Scelto **5 × `cloudveneto.large`**: 4 core danno tre punti
+alla misura sui thread, 8 GB fanno completare anche `k=4`. Il testo del corso dice «at
+least», e «processing units» si legge anche come *thread*: aggiunta una **misura secca sui
+thread** con l'ipotesi scritta prima di misurare (Map = regex + Counter in Python puro →
+tiene il GIL → `T(4)/T(1) ≈ 0,6`, non `0,25`), più **una riga** per il `foldby` sul cluster
+vero. Ripetizioni: **3 su un solo punto di riferimento** per misurare il rumore una volta,
+1 altrove. Ordine progettato per una notte interrompibile: riferimento → worker →
+partizioni **dal centro ai bordi** → thread → foldby. Regola nuova che semplifica e
+insieme corregge: **una riga del CSV = un cluster nuovo** (via i "blocchi", via
+`client.cancel`, e ogni punto parte da worker non frammentati).
+
+**Collegamenti toccati**
+`Giulia/bench_word_count.py` riscritto (183 → **107 righe di codice**): la campagna è una
+tabella di cinque righe, ogni punto è "il riferimento con una manopola cambiata"; un
+`performance_report` per **ogni** misura, che è il motivo per cui il picco di memoria non
+sta nel CSV ← `cluster.py` (+`n_threads`, simmetrico a `n_workers`; **e finalmente
+tracciato da git: non lo era**) → CSV in `~/mapd-out/bench/` → `word_count.ipynb` §9,
+riscritto e portato a cinque sezioni. `SETUP` §6 (tabella dei flavor) e §5 (via la regola
+"bench in revisione") allineati.
+
+**Trovato riallineando il notebook:** il punto di riferimento è etichettato
+`curva="riferimento"`, quindi filtrare su `curva=="partizioni"` faceva **sparire da
+entrambe le curve obbligatorie il loro punto migliore e le uniche barre d'errore**. I
+grafici ora si costruiscono come "le righe della curva più il riferimento", con l'asse x
+letto dalle colonne di stato.
+
+**Thread aperti**
+Calibrare sul cluster (`--only riferimento`) prima della notte · la scrittura del
+vocabolario finisce sui dischi dei **worker**: la cartella sulla macchina scheduler
+resterà vuota, e `SETUP` §3 dice ancora di scaricare i risultati da una macchina sola ·
+disco delle VM locale o di rete? · se l'ipotesi sul GIL regge, il seguito naturale è un
+worker per core (IP ripetuto in `cluster.txt`).
+
+**Primo tentativo sul cluster: 3 misure su 3 fallite, e il cluster era perfetto**
+(4 worker, 16 thread, 7,1 GB ciascuno — la configurazione voluta). Due trappole che
+`LocalCluster` **non può** mostrare, entrambe riprodotte e verificate in locale:
+
+1. **I dati sono replicati su ogni macchina, il codice no.** È l'asimmetria che
+   l'architettura non copriva. Nel grafo le funzioni importate viaggiano *per nome*,
+   quindi scheduler e worker devono poter importare `word_count`; via SSH nascono dalla
+   home, senza il repo nel `sys.path`. Il messaggio (*«Scheduler and Client have different
+   environments»*) manda a cercare versioni diverse: sotto c'era un `ModuleNotFoundError`,
+   **visibile solo nel log dello scheduler**. **Spiega anche perché non era mai emerso**:
+   `word_count.py` lanciato a mano ha le sue funzioni in `__main__`, che Dask spedisce per
+   valore; il benchmark le importa, quindi no. → `client.upload_file`, e da `word_count.py`
+   è uscito l'import di `cluster` (un modulo caricato così dev'essere autosufficiente).
+2. **Le cartelle di output non esistono sui worker.** `to_parquet` fa `mkdirs` sul client,
+   ma scrivono i worker sui propri dischi, e fsspec apre con `auto_mkdir=False`: sarebbe
+   stato il `FileNotFoundError` successivo. → `client.run(os.makedirs, ...)`
+
+Le due regole stanno in `PROJECT_CONTEXT.md` §8.12 perché **valgono per tutti e quattro i
+task**.
+
+**Vicolo cieco, annotato perché sembra la risposta giusta:**
+`cloudpickle.register_pickle_by_value(modulo)` non risolve — Dask consulta quel registro
+solo quando serializza *una funzione*, non quando serializza il grafo in blocco. Provato
+sul cluster, fallito allo stesso modo.
+
+**Lezione di metodo, che vale più delle due cure.** La prova generale sul campione valida
+la logica ma **non può** validare la distribuzione: in locale client, scheduler e worker
+condividono `sys.path` e file system. Non serve però il cluster per provarla — basta far
+partire scheduler e worker da una cartella fuori dal repo e collegarsi con
+`DASK_SCHEDULER` (ricetta in `PROJECT_CONTEXT.md` §8.12c). Dieci secondi, e riproduce
+entrambe le trappole. Trovata dopo aver bruciato due tentativi sul cluster vero.
+
+---
+## 2026-08-14 (notte) — la campagna è girata, e il risultato non è quello previsto
+
+**I numeri.** Riferimento `k=256`, cluster pieno: **497,6 s con dispersione 1,4%** su tre
+ripetizioni — il metodo «rumore misurato una volta, poi una ripetizione» regge, e quella
+barra è la scala di tutto il resto. Campagna completa in 128 minuti, 10 misure su 15.
+
+- **worker** (obbligatoria, completa): speedup 2,74× su 4, efficienza 0,81 → 0,69;
+- **partizioni** (obbligatoria, 5 punti su 10): minimo a `k=512`, +9,6% a `k=1979`,
+  **e sotto `k=128` non completa**;
+- **thread**: `T(4 thread)/T(1 thread) = 1,31`. Avevo previsto 0,60.
+
+**Il risultato che ribalta un'assunzione.** I thread non danno poco: **fanno male**.
+`4 worker × 1 thread` = 379,8 s usando 4 core su 16, contro 497,6 s usando tutti e 16.
+E `1 worker × 4 thread` (1.365,7 s) contro `4 worker × 1 thread` (379,8 s) sono **3,6×** a
+parità di thread nominali. Su questo carico l'unità di calcolo utile è **il processo**.
+
+**Il perché, misurato e non ipotizzato** → `Giulia/misura_ram.py` (nuovo: esegue una sola
+partizione fuori dal cluster e misura la RSS passo per passo). Il picco di un task è
+**~15× il testo** che elabora, e la fase Map da sola vale il 44% con **~230 byte per
+coppia `((cord_uid, parola), conteggio)`** — costo dell'oggetto Python, stabile a ogni
+scala, campione compreso. Quindi **un thread è un moltiplicatore di memoria**: a `k=64`
+servono 4,07 GB per task, ×4 thread = 16,3 GB contro un tetto di 7,1.
+
+**Regola nuova: il ramo sinistro della curva sulle partizioni è un confine, non un buco.**
+Sotto `k=128` il job non è eseguibile su questo hardware, e nemmeno un flavor da 16 GB
+sposterebbe il limite di più di un punto. Si riporta come risultato misurato.
+
+**Errore mio da non ripetere:** avevo previsto che `k=4` sarebbe passato, calcolando il
+**testo in ingresso** per partizione invece dell'**uscita del Map**, che è ciò che riempie
+il worker. E la prima analisi del fallimento l'ho data come fatto quando era
+un'interpolazione fra due punti: Federico ha chiesto la misura, ed è stata la cosa giusta.
+
+**Collegamenti toccati**
+`Giulia/misura_ram.py` (nuovo) · `bench_word_count.py` (+`--thread N`, per rifare una
+curva con meno thread e spostare il muro) · `word_count.ipynb` §9.1/§9.2/§9.3 riscritte:
+le curve ora si costruiscono filtrando sullo **stato reale** (`worker`, `thread`,
+`partizioni`) e non sull'etichetta `curva`, altrimenti due campagne a thread diversi
+verrebbero **mediate insieme** · `Giulia/README.md` con i risultati.
+
+**Thread aperti**
+Rifare la curva sulle partizioni con `--thread 1` (~40 min: recupera `k=64` e la misura
+nella configurazione migliore) · quanto del rallentamento dei thread è GIL e quanto è
+pressione di memoria non è separato dai dati attuali · il seguito naturale è **un worker
+per core** (IP ripetuto in `cluster.txt`), mai approvato · scaricare `~/mapd-out` dalla VM.
+
+---
+## 2026-08-14
+
+**Decisioni + perché**
+Campagna girata sul cluster: **i thread RALLENTANO** (`T(4)/T(1) = 1,31`, previsto 0,60) →
+su questo carico l'unità di calcolo utile è **il processo**, non il thread; il perché è
+misurato e non ipotizzato (`misura_ram.py`: ~230 B per coppia Map, picco = ~15× il testo,
+quindi un thread è un **moltiplicatore di memoria**). Sotto `k=128` il job non è eseguibile
+su 8 GB: **confine misurato, non buco** — *sostituita in Parte A* la riga che dava gli 8 GB
+per sufficienti al punto estremo. Il codice va **spedito ai nodi** (`client.upload_file`):
+i dati sono replicati su ogni macchina, il codice no, ed è ciò che ha bruciato due run.
+
+**Collegamenti toccati**
+`misura_ram.py` (nuovo, un processo per `k`) → `memoria.csv` · `bench_word_count.py`
+(+`--thread N`) → `misure.csv` → `word_count.ipynb` §9, che ora costruisce le curve dallo
+**stato reale** (`worker`/`thread`/`partizioni`) e non dall'etichetta `curva`, altrimenti
+due campagne a thread diversi verrebbero mediate insieme · `cluster.py` finalmente
+tracciato da git · `PROJECT_CONTEXT.md` §8.12 (trappole `SSHCluster` + banco di prova
+locale con `DASK_SCHEDULER`) · `Giulia/README.md` coi risultati.
+
+**Thread aperti**
+Curva partizioni con `--thread 1` (previsione scritta: `k=64` passa, `k=32` no) · `SETUP`
+§6 contiene ancora l'affermazione falsificata sugli 8 GB · GIL vs pressione di memoria non
+separati dai dati attuali · un worker per core (IP ripetuti in `cluster.txt`) mai approvato
+· scaricare `~/mapd-out` dalla VM · errore mio da non ripetere: previsioni date per fatti.
+
+---
+## 2026-08-16
+
+**Decisioni + perché**
+Campagna definitiva a **3 passate intere** (48 misure, 4 worker × 1 thread): il minimo sulle
+partizioni è un **plateau** `k=128`–`256`, non un punto — 0,36% di distanza contro 1,3–2,7%
+di rumore, e chiamarlo «minimo a 256» sarebbe leggere rumore.
+`bench-8x1` e `bench-16x1` chiudono l'open thread **GIL o memoria**: a parità di 8 core e di
+memoria per slot, 8 processi fanno 204,7 s contro i 416,2 di 4×2 thread e **nessuna delle due
+è vicina al tetto** → è il GIL; 16 core rendono **11,59×** come processi (eff. 0,72) contro
+**2,44×** come thread (0,15), cioè **4,7×** sullo stesso hardware.
+Sostituite in Parte A tre regole: il muro (è la memoria per slot, soglia netta a
+`0,95 × memory_limit`), le ripetizioni (passate intere), l'ordine (partizioni prima dei worker).
+
+**Collegamenti toccati**
+`bench_word_count.py` (+`picco_gb`/`picco_medio_gb` da `ru_maxrss`, +`--ripetizioni`,
+`stato_cluster` ora su `client.nthreads()`) · `cluster.py:describe()` stessa cura ·
+`word_count.py` (+`client.run(os.makedirs)`: senza, sul cluster non girava — e infatti non ci
+era mai girato, il 2.3.1 non esisteva) → `risultati/` git-ignored (5 campagne, 6 log,
+vocabolario 2.3.1 da 16 shard, 0 duplicati) · `SETUP_CLOUDVENETO.md` §3 e §6 corretti ·
+banco di prova cieco con `--nworkers 6`, che ha preso due difetti prima del cluster.
+
+**Thread aperti**
+Vocabolario: 6.098.548 parole misurate contro 6.037.808 documentate in `word_count.py:245`,
+sanificazione invariata dal commit precedente — un run locale da 15 min chiude · `README` e
+`word_count.ipynb` §9 hanno ancora i numeri della prima campagna e le due tesi corrette
+(tetto netto, thread ×1,57 e non ×4) · `bench-8x1`/`16x1` sono una passata sola e la loro
+colonna `worker` dice 5 · perché `scheduler_info()` sotto-conti resta ignoto, curato non
+capito.
+
+---
+## 2026-09-10
+
+**Decisioni + perché**
+2.3.2 riscritto distribuito in `Federico/` (DataFrame, come suggerisce il testo): legge
+`silver/authors` e **rifà da sé il rollup per paper** — quel raggruppamento è una decisione
+di analisi, e i rollup `paper_countries`/`paper_institutions` diventano il **controllo**
+(284.042 / 517.911 coppie, identiche, gratis a ogni run perché sono la somma della colonna).
+`value_counts` in **una** partizione: 206 paesi e 10⁵ istituti non sono i 6M di parole del
+2.3.1, che lì avevano imposto `split_out=16`. **Misurato: questo task sta sotto la soglia in
+cui distribuire paga** — 34 MB, e la curva sulle partizioni *cresce* (k=4: 0,44 s → k=192:
+12,35 s, ×28), 4 worker rendono 2,00× ma sull'overhead, e il punto migliore di Dask è
+comunque **1,7× più lento di pandas su un core** (0,27 s). Si consegna come risultato.
+
+**Collegamenti toccati**
+`Federico/affiliations.py` (nuovo) ← `cluster.py` → `Federico/bench_affiliations.py`
+(nuovo) → `misure.csv` · `Federico/README.md` coi numeri · `DATA_DICTIONARY.md` (riga
+2.3.2 e le due sezioni rollup: ora dicono che il task le ricalcola e ci si verifica) ·
+`CLAUDE.md` mappa (+`Federico/`, `Giulia/old/` non è più l'unica versione del 2.3.2) ·
+**qualificata in Parte A** la riga «una riga del CSV = un cluster nuovo»: vale dove il
+logoramento glibc esiste, non su un job da secondi · banco di prova §8.12c passato
+(scheduler+worker fuori dal repo: `upload_file` regge, nessun `ModuleNotFoundError`).
+
+**Thread aperti**
+Il default di `--partitions` va scelto **sul cluster vero**, non sul Mac (là il minimo è
+k=4, ma con 4 macchine meno partizioni che worker lascia qualcuno fermo) · campagna mai
+girata su Cloud Veneto · nessun notebook per il 2.3.2 · il fondo classifica degli istituti
+resta rumore di normalizzazione (68,4% singleton), documentato e non curato.
+
+---
+## 2026-09-10 (sera) — la chiave di raggruppamento delle affiliazioni
+
+**Decisioni + perché**
+Il 2.3.2 raggruppava sulla colonna del `silver`, che è normalizzata **leggera per scelta
+dichiarata** (`norm_institution`: NFKC, spazi, punteggiatura ai bordi) e lascia la
+disambiguazione ai task. Aggiunta `chiave()` — minuscole, via i caratteri non alfanumerici
+ai bordi (`‡ † △ ✉`), via l'articolo iniziale, accenti piegati — **perché la misura dice che
+cambia la risposta**: `The University of Hong Kong` era spezzata in **sei grafie** e passa
+dal 17° al 14° posto (1.188 paper); istituti distinti 105.967 → **100.838** (−4,8%), coppie
+517.911 → **517.058**. È il caso opposto a `is_reference_like` nel 2.3.1, tolto perché non
+muoveva la top-20. **L'etichetta consegnata è la grafia più frequente, non la chiave**, e non
+costa uno shuffle: `per_autore` si conta già sulla grafia e le due Serie si ricuciono sul
+client. Sui **paesi la chiave è un no-op misurato** (206 → 206: `country_converter` li ha già
+canonicalizzati) e si applica lo stesso, un ramo solo di codice.
+**E il benchmark si è ribaltato:** con il lavoro per riga che la correttezza richiedeva, il
+punto migliore passa da **1,7× più lento** di un core a **2,2× più veloce** (1,81 s a `k=8`
+contro 3,93 s di pandas), e la curva sulle partizioni acquista un **minimo interno** invece
+di crescere sempre. Quel che decide se distribuire paga non è la taglia del cluster ma
+**quanto lavoro c'è per riga**: qui lo abbiamo visto cambiare in diretta.
+
+**Collegamenti toccati**
+`Federico/affiliations.py` (+`chiave`, `ranking` raggruppa sulla chiave e conta la grafia,
+`classifica` ricuce sul client) → `Federico/bench_affiliations.py` (`baseline_pandas` fa
+**la stessa** cosa, chiave compresa: se saltasse un pezzo il rapporto Dask/pandas
+confronterebbe due lavori diversi) → campagna locale rifatta da zero, 3 passate ·
+`Federico/README.md` riscritto (sezione nuova sulla normalizzazione con la tabella regola
+per regola; benchmark aggiornati) · `DATA_DICTIONARY.md`: la nota su `paper_institutions`
+ora distingue le 517.911 coppie **grezze** dalle 517.058 **con la chiave**.
+
+**Thread aperti**
+Campagna sul cluster mai girata (un run singolo là: 39,6 s contro 13,4 s del Mac) · il
+default di `--partitions` va scelto su quei numeri: sul Mac il minimo è `k=8`, il default
+«una partizione per file» è il punto **peggiore** della curva · la curva sui worker è
+misurata al default `k=192`, quindi il 2,09× è una stima per difetto e va rifatta al `k`
+scelto · sigle (`CAS`/`NIH`) e frammenti di indirizzo restano fuori: serve un dizionario.
+
+---
+## 2026-09-10 (tarda sera) — la 8786 non si libera da sola
+
+**Decisioni + perché**
+Primo tentativo di campagna 2.3.2 sul cluster: **morta al primo punto**, `OSError: [Errno 98]
+Address already in use` sulla 8786 subito dopo un run di `affiliations.py`. Chiude il thread
+aperto il 2026-08-14 («verificare che la porta 8786 si liberi fra un cluster e il
+successivo»): **non si libera da sola**, e la pausa di `bench_word_count.py` non era
+pignoleria. `bench_affiliations.py` non ce l'aveva e accendeva **12 cluster di fila senza
+respiro**: aggiunta `PAUSA_FRA_CLUSTER = 10`, stessa costante e stessa ragione. Secondo
+difetto della stessa famiglia: `get_client` stava **fuori** dal `try/except` che protegge la
+misura, quindi un cluster che non nasce si portava via l'intera campagna invece di lasciare
+righe con l'errore — ora le sue misure diventano righe `errore` e la campagna prosegue.
+
+**Collegamenti toccati**
+`Federico/bench_affiliations.py` (+`PAUSA_FRA_CLUSTER`, `except` sul ciclo dei worker) ·
+`Federico/README.md` §Benchmark (la pausa e il perché) · misurato di passaggio: il baseline
+pandas su un core della VM è **14,18 s** contro i 3,93 s del Mac — i core delle *medium*
+sono molto più lenti, da tenere presente leggendo i tempi del cluster.
+
+**Thread aperti**
+Campagna 2.3.2 sul cluster ancora da completare · resta da scegliere il `k` di default sui
+numeri del cluster · la curva sui worker è misurata al default `k=192`, il punto peggiore.

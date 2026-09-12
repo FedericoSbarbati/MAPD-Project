@@ -2,6 +2,7 @@ archive/
 data/
 data_sample/
 reports/
+documents/
 MAPD covid project.pdf
 InstructionsAndGuidelines_MAPD2026_v1.pdf
 CLAUDE.md
@@ -39,6 +40,19 @@ CLAUDE.md
 
 # per-machine Dask cluster node list (IP dei worker) — local-only
 cluster.txt
+
+# risultati scaricati dalle VM prima di spegnerle (2026-08-15). Stanno QUI e non in
+# ~/mapd-out/ perche' il cluster non c'e' piu': la regola 4 di CLAUDE.md serviva a
+# proteggerli dal riclonaggio continuo della repo sul cluster, che ora non avviene.
+# Gitignorati: la repo e' pubblica, e comunque sono 45 MB di report Bokeh.
+risultati/
+
+# laboratorio memory-leak locale (WIP, non committare per ora)
+scripts/leaklab.py
+
+# sandbox di sviluppo sul Mac: qui si costruiscono i task passo a passo prima di
+# promuoverli nelle cartelle personali — local-only, mai committato
+local/
 
 # Kaggle API credentials (SECRET — never commit)
 .kaggle/
