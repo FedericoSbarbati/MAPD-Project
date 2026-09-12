@@ -47,6 +47,7 @@ cluster.txt
 # Gitignorati: la repo e' pubblica, e comunque sono 45 MB di report Bokeh.
 risultati/
 Niccolo/
+nicco_scripts/embeddings/
 
 # laboratorio memory-leak locale (WIP, non committare per ora)
 scripts/leaklab.py

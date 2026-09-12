@@ -15,9 +15,49 @@ Dipendenza condivisa col resto del progetto: `cluster.py` alla radice, che accen
 cluster e stampa com'è fatto. Nessun ambiente Python separato.
 
 ```bash
-python Niccolo/cosine.py Niccolo/embeddings --titoli 100000 --out ~/mapd-out/2_3_4
-python Niccolo/bench_cosine.py Niccolo/embeddings --ripetizioni 3
+python nicco_scripts/cosine.py nicco_scripts/embeddings --titoli 100000 --out ~/mapd-out/2_3_4
+python nicco_scripts/bench_cosine.py nicco_scripts/embeddings --ripetizioni 3
 ```
+
+## Sul cluster
+
+**Gli embedding servono su UNA macchina sola**, quella da cui si lancia — cioè la prima riga
+di `cluster.txt`, che fa da scheduler. È la conseguenza pratica della scelta di replicare i
+dati con `scatter`: i worker li ricevono dal driver, non li leggono da disco. Al contrario
+del modello FastText del 2.3.3, che va copiato su ogni VM.
+
+```bash
+# 1 · dal Mac, una volta: 1,1 GB verso lo SCHEDULER (rsync e non scp, cosi' un
+#     trasferimento interrotto riprende da dove era)
+rsync -av --progress \
+    -e "ssh -J UTENTE_CV@gate.cloudveneto.it -i ~/.ssh/id_ed25519" \
+    nicco_scripts/embeddings/ ubuntu@10.67.22.XYZ:mapd-data/embeddings/
+
+# 2 · sullo scheduler: la calibrazione, PRIMA della campagna (regola del repo).
+#     Cinque minuti, e dice quanto costa davvero una misura su queste VM
+source ~/pyvenv/bin/activate
+python nicco_scripts/bench_cosine.py ~/mapd-data/embeddings \
+    --only partizioni --ripetizioni 1 --out ~/mapd-out/bench_2_3_4
+
+# 3 · la campagna, dentro tmux perche' sopravviva alla connessione che cade
+tmux new -s bench
+python nicco_scripts/bench_cosine.py ~/mapd-data/embeddings \
+    --ripetizioni 3 2>&1 | tee ~/bench-cosine.log
+#     ctrl-b d per staccarsi, `tmux attach -t bench` per rientrare
+
+# 4 · il task stesso, per avere le classifiche da mostrare. --papers e' OBBLIGATORIO qui:
+#     sul cluster i dati non stanno dentro la repo
+python nicco_scripts/cosine.py ~/mapd-data/embeddings \
+    --papers ~/mapd-data/silver/papers --out ~/mapd-out/2_3_4
+```
+
+**Prima di aspettare**, leggere il blocco di configurazione: deve dire `SSHCluster`, quattro
+worker, indirizzi `10.67.22.x` e **non** `127.0.0.1` (§2e di `SETUP_CLOUDVENETO.md`).
+
+Quanto dura, su 5 × `cloudveneto.large` (1 scheduler + 4 worker da 4 vCPU): **~30 minuti a
+passata**, quindi ~1,5 ore per tre. È una stima ricavata dai tempi del Mac e dal rapporto
+fra i core (3,6× misurato sul 2.3.2), non una misura: la calibrazione del passo 2 serve
+esattamente a correggerla.
 
 ## L'algoritmo
 
@@ -113,6 +153,17 @@ Il modello è **verificato**: a 40.000 titoli e `k=4` il worker ha segnalato *«
 memory: 3.81 GiB»* contro i 3,6 GB previsti. Quindi i `k` bassi non sono lenti, sono
 **irrealizzabili** — stesso fenomeno misurato nel 2.3.1 a `k=32`, da cui lo sweep del
 benchmark parte da 4 e non da 1.
+
+Per la stessa ragione lo sweep non gira in ordine crescente ma **dal riferimento verso i
+bordi** (`16, 32, 64, 128, 8, 4`): dentro una forma di cluster le misure si susseguono, e un `k`
+che sfonda fa intervenire la nanny sul worker. Se venisse per primo, le misure successive
+girerebbero su un cluster appena riavviato — i fragili in fondo si portano via al massimo
+se stessi. È la regola d'ordine già adottata dalla campagna del 2.3.1.
+
+E per la stessa aritmetica lo sweep arriva fino a **128**: su worker da 7,1 GB con quattro
+thread, a 100.000 titoli `k=4` e `k=8` sfondano, quindi senza il 128 la curva avrebbe tre
+punti validi su cinque. A destra il muro non esiste — il picco va come `1/k²` — e si misura
+l'altro estremo, i task troppo piccoli perché il calcolo copra il costo di schedularli.
 
 ## Benchmark
 

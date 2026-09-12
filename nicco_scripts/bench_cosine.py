@@ -1,6 +1,6 @@
 """Benchmark del task 2.3.4. Un comando, e la campagna gira da sola.
 
-    python Niccolo/bench_cosine.py Niccolo/embeddings --ripetizioni 3
+    python nicco_scripts/bench_cosine.py nicco_scripts/embeddings --ripetizioni 3
 
 Le due curve obbligatorie - tempo vs numero di PARTIZIONI e tempo vs numero di WORKER
 ("at least the number of dataset partitions and the number of executors/processing units",
@@ -36,7 +36,7 @@ quindi ripetere la lista degli host mette piu' processi sulla stessa macchina, e
 
     W=ip_worker1,ip_worker2,ip_worker3,ip_worker4
     CORD19_HOSTS="ip_scheduler,$W,$W" CORD19_WORKER_MEMORY_LIMIT=3.5GB \
-        python Niccolo/bench_cosine.py ~/mapd-data/embeddings \
+        python nicco_scripts/bench_cosine.py ~/mapd-data/embeddings \
             --only worker --worker 8 --thread 1 --k 32 --ripetizioni 3
 
 `CORD19_WORKER_MEMORY_LIMIT` NON e' opzionale: il default e' una frazione della RAM di
@@ -46,7 +46,7 @@ una piastrella costa ~12-14 (titoli/k)^2 byte, per il numero di thread del worke
 
 Prova generale prima di occupare il cluster:
 
-    python Niccolo/bench_cosine.py --titoli 5000 --out /tmp/bench-2_3_4
+    python nicco_scripts/bench_cosine.py --titoli 5000 --out /tmp/bench-2_3_4
 """
 
 import argparse
@@ -58,21 +58,28 @@ from pathlib import Path
 # I worker devono poter importare il modulo del task: la radice della repo nel sys.path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
-sys.path.insert(0, str(REPO / "Niccolo"))
+sys.path.insert(0, str(REPO / "nicco_scripts"))
 
 import cosine as cs  # noqa: E402
 from cluster import available_workers, get_client  # noqa: E402
 
 # Il file spedito ai worker: i dati si scatterano, il codice no
-CODICE = REPO / "Niccolo" / "cosine.py"
+CODICE = REPO / "nicco_scripts" / "cosine.py"
 
 DEFAULT_INPUT = cs.DEFAULT_INPUT
 DEFAULT_OUT = "~/mapd-out/bench_2_3_4"
 
-# Lo sweep sulle partizioni. NIENTE 1 e 2: il picco di memoria di una piastrella va come
-# (titoli/k)^2, quindi a 100.000 titoli k=2 chiederebbe ~30 GB per task. I k bassi non sono
-# lenti, sono IRREALIZZABILI, ed e' lo stesso muro misurato nel 2.3.1 a k=32.
-BLOCCHI = (4, 8, 16, 32, 64)
+# Lo sweep sulle partizioni, ORDINATO DAL RIFERIMENTO VERSO I BORDI e non per valore
+# crescente: dentro una forma di cluster le misure si susseguono, e un k che sfonda la
+# memoria fa intervenire la nanny sul worker. Se quel k viene per primo, le misure dopo di
+# lui girano su un cluster appena riavviato. I fragili in fondo, quindi, dove al massimo si
+# portano via se stessi - stessa regola dell'ordine di campagna del 2.3.1.
+# NIENTE 1 e 2: il picco di una piastrella va come (titoli/k)^2, quindi a 100.000 titoli
+# k=2 chiederebbe ~30 GB per task. I k bassi non sono lenti, sono IRREALIZZABILI.
+# Il 128 c'e' perche' su worker da 7,1 GB con 4 thread il 4 e l'8 sfondano: senza,
+# la curva avrebbe tre punti validi su cinque. A destra il muro non esiste (il picco
+# va come 1/k^2) e si misura l'altro estremo, i task troppo piccoli.
+BLOCCHI = (16, 32, 64, 128, 8, 4)
 
 # I punti della curva sui thread. Espliciti e non "quanti core ha il nodo", perche' qui il
 # numero di thread E' la variabile misurata.

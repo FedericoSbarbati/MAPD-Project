@@ -1,6 +1,6 @@
 """Task 2.3.4 - similarita' coseno fra tutte le coppie di titoli.
 
-    python Niccolo/cosine.py Niccolo/embeddings --titoli 100000 --out ~/mapd-out/2_3_4
+    python nicco_scripts/cosine.py nicco_scripts/embeddings --titoli 100000 --out ~/mapd-out/2_3_4
 
 L'IDEA IN TRE RIGHE. La similarita' coseno fra due vettori e' il loro prodotto scalare
 diviso per le due lunghezze; se si normalizzano i vettori UNA VOLTA (costo N x 300, cioe'
@@ -26,7 +26,7 @@ Perche' `delayed` e non le altre collezioni: un DataFrame farebbe "tutte le copp
 cross join, cioe' materializzando 470 miliardi di righe; un Bag avrebbe come elementi
 coppie di indici, non dati, e aggiungerebbe una manopola (`npartitions`) che nei benchmark
 si confonde con k; `dask.array` calcolerebbe tutte e k^2 le piastrelle, perche' non sa che
-S e' simmetrica. -> Niccolo/README.md
+S e' simmetrica. -> nicco_scripts/README.md
 """
 
 import argparse
@@ -48,7 +48,7 @@ import numpy as np           # noqa: E402
 import pandas as pd          # noqa: E402
 from dask import delayed     # noqa: E402
 
-DEFAULT_INPUT = "Niccolo/embeddings"
+DEFAULT_INPUT = "nicco_scripts/embeddings"
 DEFAULT_PAPERS = "data/silver/papers"
 DEFAULT_OUTPUT = "~/mapd-out/2_3_4"
 
@@ -310,6 +310,12 @@ def main():
     source, papers, out = risolvi(args.input), risolvi(args.papers), risolvi(args.out)
     if not embedding_files(source):
         raise SystemExit(f"Nessun file .parquet in {source}")
+    # I titoli servono solo alla fine, ma si controlla ADESSO: sul cluster i dati non stanno
+    # dentro la repo, e il default relativo non esiste la'. Scoprirlo dopo il calcolo
+    # significherebbe buttare il calcolo.
+    if not list(Path(papers).glob("*.parquet")):
+        raise SystemExit(f"Nessun file .parquet in {papers}\n"
+                         "Sul cluster passa --papers ~/mapd-data/silver/papers")
     out.mkdir(parents=True, exist_ok=True)
 
     uid, X = load_vectors(source, args.titoli, args.seed)
