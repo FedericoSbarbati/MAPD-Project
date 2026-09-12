@@ -1,54 +1,3 @@
-"""Benchmark del task 2.3.1. Un comando, e la campagna gira da sola tutta la notte.
-
-    python Giulia/bench_word_count.py ~/mapd-data/silver/paragraphs
-
-Il corso considera INCOMPLETA un'analisi senza benchmark, e chiede di studiare come il
-tempo di esecuzione dipende dai parametri del cluster: "at least the number of dataset
-partitions and the number of executors/processing units" (InstructionsAndGuidelines,
-punto 5). Quel "processing units" si legge in due modi - le macchine e i thread - e qui
-si misurano tutti e due.
-
-LA REGOLA CHE REGGE TUTTO IL FILE: una riga del CSV = una misura = un cluster nuovo.
-Costa un minuto a punto, e in cambio:
-  - sparisce il concetto di "blocco", con tutta la contabilita' di quale cluster e'
-    acceso e in che ordine si puo' scalare;
-  - non serve cancellare niente dopo un fallimento: subito dopo il cluster viene
-    distrutto comunque;
-  - ogni punto parte da worker APPENA NATI. Non e' pignoleria: su questo cluster un
-    worker che ha gia' macinato milioni di stringhe trattiene RSS per frammentazione
-    glibc (PROJECT_CONTEXT.md §7, Atto 3). Riusando un cluster per nove punti, l'ultimo
-    girerebbe su worker stanchi e la misura sommerebbe partizionamento e usura.
-
-Il lavoro cronometrato e' ESATTAMENTE quello che `word_count.py` consegna, scrittura del
-vocabolario compresa. Non un sottoinsieme piu' comodo da misurare: il crash dell'11
-agosto stava proprio nella scrittura, cioe' nel pezzo che il vecchio benchmark saltava.
-
-**Prova generale prima di lasciarla andare** - serve a scoprire un percorso sbagliato la
-sera invece che alle sette del mattino. Stessa identica campagna, sul campione:
-
-    python Giulia/bench_word_count.py --out /tmp/bench-prova --timeout 300
-
-**Calibrazione sul cluster, prima della notte.** Tre misure dello stesso punto: danno la
-dispersione (il rumore) e il numero da cui ricalcolare il budget di tutto il resto.
-
-    python Giulia/bench_word_count.py ~/mapd-data/silver/paragraphs --only riferimento
-
-**E poi, sul serio**, dentro `tmux` e con tutto l'output su un file:
-
-    tmux new -s bench
-    python Giulia/bench_word_count.py ~/mapd-data/silver/paragraphs \
-        --thread 1 --ripetizioni 3 2>&1 | tee ~/bench.log
-
-`--thread 1` perche' e' la configurazione che i benchmark hanno SELEZIONATO: i thread
-rallentano a ogni k provato (+24% ... +31%), quindi la campagna definitiva gira dove il
-codice va meglio. `--ripetizioni 3` sono tre passate intere della campagna, non tre misure
-di fila dello stesso punto - il perche' sta in `campagna`.
-
-Ogni riga porta anche il **picco di RAM dei worker** (`picco_gb`, `picco_medio_gb`), preso
-con lo stesso strumento di `Giulia/misura_ram.py` e senza campionare niente: vedi
-`picco_memoria`.
-"""
-
 import argparse
 import csv
 import os
@@ -66,7 +15,7 @@ from distributed import performance_report, wait  # noqa: E402
 import word_count as wc  # noqa: E402
 from cluster import available_workers, get_client  # noqa: E402
 
-# File sent to every worker to be executed, see 'misura' document
+# File sent to every worker to be executed
 CODICE = REPO / "Giulia" / "word_count.py"
 
 DEFAULT_INPUT = "data_sample/silver/paragraphs"   # no arguments = try on a sample
@@ -226,7 +175,6 @@ def misura(p, files, args):
     """
     Start a cluster and run benchmark for a single configuration.
     """
-
 
     client = cluster = None
 

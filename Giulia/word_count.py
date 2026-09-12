@@ -1,20 +1,3 @@
-"""Task 2.3.1 - distributed word count over the CORD-19 body text.
-
-v4: the algorithm of v1-v3, now on a real cluster and writing its results.
-
-    Map phase     for each document D, emit the pairs (w, cp(w)),
-                  where cp(w) is the number of occurrences of w inside D
-    Reduce phase  for each word w, sum cp(w) over all documents -> c(w)
-
-The same file runs unchanged on the Mac and on Cloud Veneto: where the computation
-happens is decided by cluster.txt / env vars, never by editing the code (see cluster.py).
-
-    python Giulia/word_count.py                          # sample data, local cluster
-    python Giulia/word_count.py data/silver/paragraphs    # full corpus
-
-Sanitization rules are all measured, not customary - see NOTES.md.
-"""
-
 import argparse
 import operator
 import os
@@ -315,9 +298,7 @@ def word_count(paragraphs, split_out=SPLIT_OUT):
 
 
 def barplot(top, path, title):
-    """The barplot of the most frequent words, as the assignment asks for."""
     import matplotlib
-
     matplotlib.use("Agg")  # no display on the VM
     import matplotlib.pyplot as plt
 

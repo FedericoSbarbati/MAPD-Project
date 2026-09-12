@@ -1,27 +1,3 @@
-"""Task 2.3.2 - i paesi e gli istituti piu' e meno rappresentati nella ricerca.
-
-Il testo chiede di classificare paesi e istituti a partire dalle AFFILIAZIONI DEGLI
-AUTORI, e suggerisce (senza obbligare) di passare dal Bag del 2.3.1 al DataFrame: qui si
-usa il DataFrame di Dask.
-
-    silver/authors            una riga per (paper, autore)
-      |  dropna               un autore senza affiliazione non vota
-      |  chiave               le grafie della stessa entita' cadono sulla stessa chiave
-      |  drop_duplicates      (paper, chiave): un paper conta UNA volta per entita'
-      v  value_counts         l'unico shuffle del job
-    classifica  entita' -> paper, e la stessa cosa senza il dedup -> autori
-
-Il conteggio per PAPER e' la metrica primaria: senza il dedup un articolo con quaranta
-co-autori italiani varrebbe quaranta volte uno con un autore solo. Il conteggio per
-AUTORE resta in tabella accanto, cosi' l'inflazione da co-autori si legge come numero.
-
-Lo stesso file gira invariato sul Mac e su Cloud Veneto: dove gira lo decide cluster.txt,
-mai il codice (vedi cluster.py).
-
-    python Federico/affiliations.py                        # campione, cluster locale
-    python Federico/affiliations.py data/silver/authors    # corpus completo
-"""
-
 import argparse
 import re
 import sys
@@ -32,59 +8,53 @@ from pathlib import Path
 import dask
 import dask.dataframe as dd
 
+# Input and output paths
 DEFAULT_INPUT = "data_sample/silver/authors"
-DEFAULT_OUTPUT = "~/mapd-out/2_3_2"   # fuori dalla repo: sul cluster la repo si ricancella
+DEFAULT_OUTPUT = "~/mapd-out/2_3_2"  
 TOP_N = 20
 
-# Le sole colonne che servono. Il Parquet e' colonnare: leggerne tre invece di nove
-# significa leggere meno byte dal disco, non filtrarli dopo.
-COLUMNS = ["cord_uid", "country", "institution_norm"]
+# Default number (overwritten with args in benchmark script)
+DEFAULT_PARTITIONS = 8
 
-# Le due classifiche chieste dal testo: nome dell'output -> colonna di silver/authors.
+
+COLUMNS = ["cord_uid", "country", "institution_norm"]
 AFFILIAZIONI = {"country": "country", "institution": "institution_norm"}
 
+# SANIFICATION from artifacts in pdf/pmc parsing using regexp
+# ^[^\w]+ : At the beginning of the string search for one or more (+) non alphanumeric characters or _
+# Pipe (|) here works as a OR
+# [^\w]+$ : At the end of the string search for one or more (+) non alphanumeric characters or _
+# Unicode helps for accents interpretation
+# PS: It was full of entities like: †University of Padua‡
 
-# ----------------------------------------------------------------------------------
-# La chiave di raggruppamento
-#
-# Il silver normalizza gli istituti in modo DICHIARATAMENTE leggero (NFKC, spazi
-# collassati, punteggiatura tolta ai bordi) e lascia la disambiguazione ai task. Quello
-# che resta e' la stessa istituzione scritta in piu' modi, e non e' cosmetico: misurato
-# sul corpus, "The University of Hong Kong" e' spezzata in SEI grafie e con il
-# raggruppamento corretto passa dal 17o al 14o posto. Ogni regola qui sotto e' stata
-# aggiunta dopo averne misurato l'effetto (README).
-# ----------------------------------------------------------------------------------
-
-# I marcatori di nota che il PDF attacca al nome dell'affiliazione: ‡ † △ ✉ e simili
 BORDI = re.compile(r"^[^\w]+|[^\w]+$", re.UNICODE)
+
+# Improved standardization removing articles.
+# ^(the|la|le|el|il) : Search for these at the beginning of the string
+# \s+ : Followed by one or more blank spaces (case independent)
 ARTICOLO = re.compile(r"^(the|la|le|el|il)\s+", re.IGNORECASE)
 
 
 def chiave(nome):
-    """Nome di affiliazione -> chiave di raggruppamento.
-
-    Grafie diverse della stessa entita' devono cadere sulla stessa chiave:
-    1- via i caratteri non alfanumerici ai bordi (i marcatori di nota)
-    2- via l'articolo iniziale ('The University of X' = 'University of X')
-    3- minuscolo
-    4- accenti piegati: l'estrazione dal PDF perde gli accenti a intermittenza, e
-       'aix marseille universite' e' lo stesso posto di 'aix marseille universite'
-       con l'accento. NFKD separa la lettera dal segno, e i segni si scartano.
     """
+    Sanitization and standardization of the names.
+    Applies BORDI and ARTICOLO regular expression and sobstitutes the match with null space.
+    Then separates accents from characters using NFKD and in the end remove the accent.
+    """
+    # Apply regexp on a name and convert to lower case
     nome = ARTICOLO.sub("", BORDI.sub("", nome)).lower()
+    # NFKD standardization works like this on accents: "é" → "e" + "´" 
     nome = unicodedata.normalize("NFKD", nome)
+
+    # Removing the accents previously separated in the return
+    # Example: "université de padoue" → "universite de padoue"
     return "".join(c for c in nome if not unicodedata.combining(c))
 
 
-# ----------------------------------------------------------------------------------
-# Lettura: k partizioni si ottengono RAGGRUPPANDO I FILE, non con un repartition a valle
-# (che rileggerebbe alla stessa granularita' e metterebbe la ricucitura nel cronometro).
-# k e' la variabile della curva obbligatoria "tempo vs numero di partizioni".
-# ----------------------------------------------------------------------------------
-
-
 def author_files(path):
-    """I file 'part.<n>.parquet' della cartella, ordinati per <n> e non alfabeticamente."""
+    """
+    Sort the parquet files (part.<n>.parquet) and sort by increasing n instead of alphabetical order
+    """
 
     def part_number(file):
         pieces = file.stem.split(".")          # "part.137" -> ["part", "137"]
@@ -94,86 +64,121 @@ def author_files(path):
 
 
 def split_evenly(files, k):
-    """La lista dei file divisa in k gruppi di lunghezza quasi uguale."""
-    k = max(1, min(int(k), len(files)))        # k oltre il numero di file non ha senso
+    """
+    Given all the path to the files return a list of group files with the desired number of partitions.
+    PS: an element of the returned list is a group of path. One of this element is something like:
+        [
+        "part.0.parquet",
+        "part.1.parquet",
+        "part.2.parquet"
+        ]
+
+    """
+    k = max(1, min(int(k), len(files)))        # Check: Don't exceed the total number of files
     return [files[i * len(files) // k:(i + 1) * len(files) // k] for i in range(k)]
 
 
+# ----------------------------------------------------------------------------------
+# ----------------------------------------------------------------------------------
+
+
 def load_group(group):
-    """Un gruppo di file -> un DataFrame pandas, cioe' UNA partizione."""
+    """
+    Load a group of files and select just the selected columns.
+    Converts the pyarrow table to Pandas DataFrame.
+    """
+
     import pyarrow.parquet as pq
 
     return pq.read_table(list(group), columns=COLUMNS).to_pandas()
 
 
 def read_groups(groups):
-    """k gruppi di file -> un DataFrame Dask a k partizioni. Lazy: qui non legge niente.
-
-    `meta` e' lo scheletro vuoto (nomi e tipi delle colonne) che Dask usa per sapere la
-    forma del risultato senza eseguire: si prende dallo schema di un file, che non costa
-    una lettura.
+    """
+    Create one lazy DaskDataframe with one partition per group.
+    meta is an empty Pandas Dataframe used to infer the schema from the first element and select the desired columns.
+    Then load_group is mapped to each group, returning for each call a Pandas DataFrame which becomes one DaskPartition
     """
     import pyarrow.parquet as pq
 
+    # Converts Path objects to strings while preserving groups structure
     groups = [[str(file) for file in group] for group in groups]
+
+    # Read only the schema of the first file and build the metadata DataFrame.
     meta = pq.read_schema(groups[0][0]).empty_table().select(COLUMNS).to_pandas()
+
+    # Build one lazy Dask DataFrame with one partition per group (Pandas DF).
     return dd.from_map(load_group, groups, meta=meta)
 
 
 # ----------------------------------------------------------------------------------
-# Il calcolo
 # ----------------------------------------------------------------------------------
 
 
 def ranking(authors, column):
-    """Le due classifiche di una colonna di affiliazione. Lazy.
-
-    Restituisce (per_paper, per_autore):
-        per_paper    indicizzata sulla CHIAVE   quanti paper per entita'
-        per_autore   indicizzata sulla GRAFIA   quante righe-autore per grafia
-
-    Le due indicizzazioni sono diverse apposta: la chiave serve a raggruppare, la grafia
-    a ricavare l'etichetta leggibile. Cosi' l'etichetta non costa uno shuffle in piu' -
-    si ricuce sul client, dove sono 10^5 righe (vedi `classifica`).
-
-    value_counts riduce in UNA partizione, e qui e' la scelta giusta: le entita' distinte
-    sono 206 paesi e ~10^5 istituti, non i 6 milioni di parole del 2.3.1 che avevano
-    costretto a spezzare il reduce.
     """
+    Takes authors dask DataFrame and a column (country or institution_norm) and returns:
+
+    per_autore : Dask DF containing frequencies with non-sanitized affiliations
+    per_paper  : Dask DF containing frequencies with sanitized affiliations
+
+    per_paper  : (key,key_counts)
+    per_author : (country or institution, count) with the non-sanitized entities
+
+    Performs lazy operation
+    """
+
+    # Remove columns with missing country or institute affiliation (is a Dask DataFrame)
     valid = authors[["cord_uid", column]].dropna(subset=[column])
+
+    # Get unique values from the selected column and the corresponding frequency
     per_autore = valid[column].value_counts()
+
+    # Create a new Dask DF from valid with a new column called Chiave
+    # The new column is filled with the chiave function applied to the Dask Series valid[column] that is partitioned
+    # meta is used to deduce sctructure and type without executing (lazy)
     chiavi = valid.assign(chiave=valid[column].map(chiave, meta=(column, "string")))
+
+    # Now we select the id column and key, dedup duplicates (same paper listed multiple times) and count frequencies
     per_paper = chiavi[["cord_uid", "chiave"]].drop_duplicates().chiave.value_counts()
+
     return per_paper, per_autore
 
 
 def classifica(per_paper, per_autore):
-    """Le due Serie gia' calcolate -> una tabella pandas ordinata per numero di paper.
-
-    L'etichetta consegnata e' la GRAFIA PIU' FREQUENTE della chiave, non la chiave, che
-    e' minuscola e senza accenti: 'The University of Hong Kong' resta scritto bene, e
-    vale la somma delle sue sei grafie.
+    """
+    Takes the computed series and returns a pandas DF with the results of the classification
     """
     import pandas as pd
 
+    # Link every entity to the number of authors connected to that entity
     grafie = per_autore.rename_axis("entity").reset_index(name="authors")
+    # Link every entity to the corresponding sanitized key
     grafie["chiave"] = grafie["entity"].map(chiave)
-    grafie = grafie.sort_values("authors", ascending=False)   # la prima e' la piu' frequente
+
+    # For every key take the most frequent entity
+    grafie = grafie.sort_values("authors", ascending=False)   
+
+    # Aggregate for every key the most frequent entity with the sum of the number of authors
+    # EXAMPLE:    
+    #       chiave                    | entity                      | authors
+    #       university of hong kong   | The University of Hong Kong | 100
     frame = grafie.groupby("chiave").agg(entity=("entity", "first"),
                                          authors=("authors", "sum"))
+    # Add the column with the number of papers associated with the key
     frame["papers"] = per_paper
+    # Now sort for descending n. of papers or alphabetical for a spare and drop the key column
     return (frame.sort_values(["papers", "entity"], ascending=[False, True])
                  .reset_index(drop=True)[["entity", "papers", "authors"]])
 
 
 def barplot(frame, path, title):
-    """Il grafico che il testo chiede, per la cima e per il fondo della classifica."""
     import matplotlib
 
-    matplotlib.use("Agg")                      # nessuno schermo sulla VM
+    matplotlib.use("Agg")                     
     import matplotlib.pyplot as plt
 
-    righe = frame.iloc[::-1]                   # il primo in classifica finisce in alto
+    righe = frame.iloc[::-1]                  
     fig, ax = plt.subplots(figsize=(9, max(4, 0.32 * len(righe))))
     ax.barh(righe["entity"].astype(str), righe["papers"], color="#2f6f73")
     ax.set_title(title)
@@ -186,6 +191,11 @@ def barplot(frame, path, title):
 
 # ----------------------------------------------------------------------------------
 
+# Command-line arguments:
+#   input       Optional authors dataset path; defaults to the sample dataset.
+#   --out       Output directory for ranking CSV files and plots.
+#   --top       Number of entities shown in the top and bottom rankings.
+#   --partitions Number of Dask partitions used to process the dataset.
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
@@ -195,54 +205,72 @@ def parse_args():
                         help=f"dove scrivere i risultati (default {DEFAULT_OUTPUT})")
     parser.add_argument("--top", type=int, default=TOP_N,
                         help=f"quante entita' in cima e in fondo alla classifica (default {TOP_N})")
-    parser.add_argument("--partitions", type=int,
-                        help="raggruppa i file in N partizioni (default: una per file). "
-                             "E' il pomello della curva obbligatoria sulle partizioni")
+    parser.add_argument("--partitions", type=int, default=DEFAULT_PARTITIONS,
+                        help=f"raggruppa i file in N partizioni (default {DEFAULT_PARTITIONS}, "
+                             "misurato). E' il pomello della curva obbligatoria sulle partizioni")
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
 
-    # I percorsi relativi si risolvono sulla radice della repo, non sulla cartella da cui lanci
+    # Add the repository to the the available python modules to import
     repo = Path(__file__).resolve().parent.parent
     sys.path.insert(0, str(repo))
+
     from cluster import get_client
 
+    # Input and output path
     source = Path(args.input).expanduser()
     source = source if source.is_absolute() else repo / source
     out = Path(args.out).expanduser()
     out = out if out.is_absolute() else repo / out
 
+    # Debug
     files = author_files(source)
     if not files:
         raise SystemExit(f"Nessun file .parquet in {source}")
     out.mkdir(parents=True, exist_ok=True)
 
+    # Connect to the scheduler and cluster
     client, cluster = get_client(repo_root=repo)
     print("input     :", source, f"({len(files)} file)")
     print("output    :", out)
 
-    authors = read_groups(split_evenly(files, args.partitions or len(files)))
+    # Create Dask Lazy collection distributed in k partitions with columns: "cord_uid", "country", "institution_norm" for every author 
+    authors = read_groups(split_evenly(files, args.partitions))
     print("partizioni:", authors.npartitions)
 
-    # Un solo grafo per tutte e quattro le Serie: cosi' i file si leggono UNA volta.
-    # Calcolarle una per una rileggerebbe silver/authors da capo a ogni compute.
+
+    # Preparing the four Dask graph (lazy):
+    #   [
+    #       per_paper_country,
+    #       per_autore_country,
+    #       per_autore_institution
+    #       per_paper_institution,
+    #   ]
+    # The idea is to compute the four graphs simoultaneously to share common operations and read the files just one time
     lazy = [serie for column in AFFILIAZIONI.values() for serie in ranking(authors, column)]
 
     started = time.perf_counter()
     try:
+        # Computing simoultaneosly all graphs in lazy list
         risultati = dask.compute(*lazy)
         elapsed = time.perf_counter() - started
     finally:
+        # Cluster shut dowon
         client.close()
         if cluster is not None:
             cluster.close()
 
+
     for posizione, (nome, column) in enumerate(AFFILIAZIONI.items()):
         per_paper, per_autore = risultati[2 * posizione], risultati[2 * posizione + 1]
+
+        # Use Pandas to create the ranking
         frame = classifica(per_paper, per_autore)
 
+        # Graphs
         frame.to_csv(out / f"{nome}_ranking.csv", index=False)
         barplot(frame.head(args.top), out / f"{nome}_top.png",
                 f"{nome}: le {args.top} entità con più paper")

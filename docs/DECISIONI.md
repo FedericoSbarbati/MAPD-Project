@@ -522,3 +522,98 @@ sono molto più lenti, da tenere presente leggendo i tempi del cluster.
 **Thread aperti**
 Campagna 2.3.2 sul cluster ancora da completare · resta da scegliere il `k` di default sui
 numeri del cluster · la curva sui worker è misurata al default `k=192`, il punto peggiore.
+
+---
+## 2026-09-11 — i benchmark del 2.3.2, e cosa hanno deciso
+
+**Decisioni + perché**
+Campagna chiusa: **165 misure, zero errori**, 6 passate sulle due curve obbligatorie e 3 sul
+confronto processi/thread. Tre decisioni, tutte con la misura sotto.
+**(1) `DEFAULT_PARTITIONS = 8`** nel task, al posto di «una per file»: quello era il punto
+**peggiore** della curva (6,5× il minimo), mentre 8 vince o pareggia in tutte e tre le
+configurazioni provate — e a 8 processi `k=16` costa il 24% in più (3,91 contro 4,87 s,
+sei deviazioni standard). È una **costante misurata, non una formula**: «una partizione per
+processo» spiega il minimo a 8 processi ma a 4 darebbe `k=4`, che è peggio di `k=8`.
+**(2) Su questo carico l'unità di calcolo utile è il PROCESSO.** A parità di core i processi
+vincono sempre (`8×1` batte `4×2` di 1,33×, `4×1` batte `2×2` di 1,70×), e il secondo thread
+per worker rende **1,01×**, cioè niente: la frazione che due thread si spartiscono davvero è
+~1,5%, il resto è GIL. Confermato su **tutti e nove** i `k`, dove le curve `4×1` e `4×2` si
+sovrappongono entro il ±6% **con metà dei core**. Ipotesi scritta prima di misurare
+(«processi vincono, meno nettamente del 2.3.1»): rispettata, 1,33× contro 2,03×. Differenza
+col 2.3.1: là i thread **rallentavano**, qui sono **inerti**.
+**(3) La curva sui worker si misura al punto di lavoro, non al default**: a `k=16` dà 2,90×
+su 4 worker, a `k=192` dava 2,48×. Dove il job è quasi solo coordinamento, la misura
+sottostima. *Sostituisce la riga di ieri che riportava 2,51× come speedup del task.*
+Sommando i due pomelli: **3,91 s** (`8×1`, `k=8`) contro i **41,09 s** della configurazione
+di partenza — **10,5×** a parità di hardware e di codice.
+
+**Collegamenti toccati**
+`Federico/affiliations.py` (+`DEFAULT_PARTITIONS`) ← `Federico/bench_affiliations.py`, dove
+`--k` ora eredita quel default, la campagna è diventata una **tabella di forme di cluster**
+`{(worker, thread): [(curva, k)]}` e ci sono `--only`, `--worker`, `--thread`, `--k` ·
+`CORD19_HOSTS` raddoppiata + `CORD19_WORKER_MEMORY_LIMIT=1.7GB` per gli 8 worker su 4
+macchine, **senza toccare `cluster.txt`** (stessa ricetta di `bench-16x1` del 2.3.1) ·
+`Federico/README.md` §Benchmark riscritta coi numeri del cluster ·
+`risultati/affiliazioni/` (git-ignored): 165 misure + log + output del task.
+
+**Thread aperti**
+`cluster.txt` a quattro voci significa `4×2 thread` di default, cioè **metà cluster fermo**:
+automatizzare il raddoppio in `cluster.py` tocca l'unico file condiviso fra i quattro task e
+va discusso col gruppo · perché a 8 processi il minimo sia un punto e a 4 un plateau resta
+**annotato e non capito** · il 2.3.2 non ha notebook.
+
+---
+## 2026-09-11 (sera) — il 2.3.4, e il primo task che non è GIL-bound
+
+**Decisioni + perché**
+Nasce `Niccolo/` (2.3.4, similarità coseno): `cosine.py` + `bench_cosine.py`, stessa interfaccia
+di `Federico/`. **Normalizzare una volta** rende il coseno un puro prodotto scalare, quindi
+«tutte le coppie» è `X @ Xᵀ` — BLAS, 180-620 GFLOPS sul Mac contro i ~10⁶ op/s di un ciclo
+Python — e si taglia in **piastrelle** `(i,j)` con `i ≤ j`. **`delayed` e non DataFrame/Bag/
+array**: il DataFrame farebbe un cross join da 470 mld di righe, il Bag userebbe come elementi
+coppie di indici e aggiungerebbe una manopola che nei benchmark si confonde con `k`, `dask.array`
+calcolerebbe tutte e `k²` le piastrelle perché non sa che `S` è simmetrica. **Il risultato è più
+grande dell'input** (40 GB a 100.000 titoli, 3,7 TB sul corpus), quindi ogni piastrella **riduce
+sul posto** (top-20, bottom-20, istogramma) — Map/Reduce **esatto**, non approssimato. Primo task
+**compute-bound** del progetto: i dati si **replicano** (`scatter`, 120 MB) e si distribuisce il
+calcolo, quindi **gli embedding servono solo sulla macchina da cui si lancia**, non su ogni VM.
+**`--titoli 100000` (≈ N/10)** come default e **fisso** per tutta la campagna: il costo va come
+`N²`, il corpus intero è ~45 min su un core e non sta in una campagna; sotto, si misurerebbe solo
+coordinamento (l'errore pagato dal 2.3.2). Campione a **quota per file con seed**, non i primi N
+(starebbero tutti in `part.0`).
+**IPOTESI SCRITTA PRIMA DI MISURARE, e la prima misura la conferma:** qui il lavoro è in BLAS, che
+**rilascia il GIL**, quindi i thread dovrebbero funzionare al contrario del 2.3.1/2.3.2. In locale
+il **secondo thread rende 1,78×** dove nel 2.3.2 rendeva 1,01×. Perciò la **curva sui thread è di
+prima classe**, non un contorno. Condizione perché quella misura significhi qualcosa: **BLAS a un
+thread** (`single_thread_blas()` via `pre-spawn-environ`, stesso aggancio di `MALLOC_TRIM_THRESHOLD_`,
+**senza toccare `cluster.py`**) — altrimenti 4 worker × 4 thread BLAS su 4 core misurano il proprio
+thrashing. Verificato interrogando i worker.
+**Il muro di memoria è su `k`, non sui dati:** una piastrella costa **~12-14 (N/k)² byte × thread
+del worker**. Modello verificato (previsti 3,6 GB a 40.000 titoli e `k=4`, osservati 3,81 GiB dal
+warning della nanny): a 100.000 titoli `k=4` chiederebbe 7,5 GB **per task**. I `k` bassi non sono
+lenti, sono **irrealizzabili** — stesso fenomeno del `k=32` nel 2.3.1 — e lo sweep parte da 4 perché
+il muro **si misura**, e un `k` che sfonda lascia una riga `errore` invece di uccidere la campagna.
+**Correttezza verificata una volta, non a ogni run** (regola dell'invariante Map/Reduce del 2.3.1):
+a `k = 3, 8, 16` su 2.000 titoli le top-20 e bottom-20 sono **identiche** al calcolo diretto. A ogni
+run resta l'invariante a costo zero, coppie contate contro attese — che ha trovato un difetto vero:
+in **float32 due vettori identici danno 1,0000001**, cadono fuori dal range dell'istogramma e
+spariscono (4 coppie su 12.497.500). Curato con un `clip` in-place, che è anche la definizione.
+**Cosa NON si consegna**, per scelta: la matrice, il vicino più simile di *ogni* paper, il
+clustering, la curva tempo-vs-N.
+
+**Collegamenti toccati**
+`Niccolo/cosine.py` (nuovo) ← `Niccolo/bench_cosine.py` (nuovo, ricalca `bench_affiliations.py`:
+CSV in append, `client.nthreads()` per lo stato, forme `{(worker, thread): [(curva, k)]}`,
+`PAUSA_FRA_CLUSTER = 10`, `get_client` dentro il `try`) → `cluster.py` usato **senza modifiche**
+(`single_thread_blas` sfrutta l'`update` che `configure_memory` fa già) · legge `Niccolo/embeddings/`
+(output 2.3.3 di Daniele) e `data/silver/papers` per i titoli · `Niccolo/README.md` (nuovo, coi
+numeri) · `CLAUDE.md` §4 (riga nella mappa) · `.gitignore` (la riga per gli embedding era un
+**percorso assoluto**, che git ignora: 1,1 GB non erano davvero esclusi — corretta).
+
+**Thread aperti**
+Campagna sul cluster mai lanciata (numeri di oggi = Mac: minimo `k=16`, worker 2,43×, thread 1,78×,
+7,0× su NumPy un core) · `--titoli` va ricalibrato sui tempi delle VM · **decisione rimandata**: se
+filtrare i titoli duplicati (28,0 % del corpus) e quelli con `n_words ≤ 1-3` (0,58 % / 4,96 %) —
+tre titoli tedeschi di cui il modello conosce solo `"der"` risultano **identici al 100 %** · il
+2.3.4 non ha notebook · su `SSHCluster` resta da verificare che `pre-spawn-environ` porti davvero
+le variabili BLAS sui nodi.

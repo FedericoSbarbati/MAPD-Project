@@ -78,8 +78,9 @@ codice è più facile da spiegare di due, e perché il no-op è esso stesso una 
 
 ## Il risultato
 
-Corpus completo (`data/silver/authors`, 2.943.737 righe, 192 file, 34 MB), Mac con
-`LocalCluster` a 4 worker: **13,4 s**.
+Corpus completo (`data/silver/authors`, 2.943.737 righe, 192 file, 34 MB). Sul cluster
+Cloud Veneto, nella configurazione misurata come migliore (8 processi da 1 thread,
+`k=8`): **3,9 s**. Con il default di partenza erano 41 s — vedi Benchmark.
 
 | paese | paper | autori |    | istituto | paper | autori |
 |---|---:|---:|---|---|---:|---:|
@@ -128,7 +129,7 @@ python Federico/affiliations.py ~/mapd-data/silver/authors --out ~/mapd-out/2_3_
 |---|---|
 | `--out DIR` | dove scrivere (default `~/mapd-out/2_3_2`, **fuori dalla repo**) |
 | `--top N` | quante entità in cima e in fondo alla classifica (default 20) |
-| `--partitions N` | raggruppa i 192 file in N partizioni (default: una per file) |
+| `--partitions N` | raggruppa i 192 file in N partizioni (default **8**, misurato — vedi Benchmark) |
 
 In uscita, per ciascuna delle due classifiche: il CSV completo (`*_ranking.csv`, con
 `entity`, `papers`, `authors`) e i due grafici `*_top.png` / `*_bottom.png`.
@@ -219,39 +220,113 @@ ma **meno nettamente del 2.3.1**, dove il Map era interamente Python e i thread 
 a *rallentare* (`T(4)/T(1) = 1,31`). Se `8×1` batte `4×2` a parità di otto core, la causa
 è il GIL; se pareggiano, il collo di bottiglia è altrove.
 
-### I risultati sul Mac (`LocalCluster`, 4 worker × 3 thread, corpus completo)
+### I risultati, sul cluster vero (5 × `cloudveneto.medium`: 4 worker da 2 core e 4 GB)
 
-Tre passate intere della campagna, dispersione fra 1,1% e 5,2%.
+**165 misure, zero errori.** Le due curve obbligatorie hanno 6 passate intere, il
+confronto processi/thread ne ha 3. `pandas` su un core della stessa VM: **14,15 s**
+(dispersione 1,5% su 21 misure) — è il metro di paragone di tutto ciò che segue.
 
-| partizioni | 1 | 2 | 4 | **8** | 16 | 32 | 64 | 128 | 192 |
+#### Curva 1 — tempo contro numero di partizioni
+
+Tre configurazioni, e la terza è quella che risponde alla domanda sul default.
+
+| k | 1 | 2 | 4 | **8** | 16 | 32 | 64 | 128 | 192 |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| secondi | 4,39 | 3,59 | 2,22 | **1,81** | 1,95 | 3,17 | 4,08 | 8,82 | 14,25 |
+| 4 proc × 2 thread | 15,56 | 12,46 | 7,63 | 6,77 | 6,67 | 10,12 | 13,16 | 27,16 | 41,09 |
+| 4 proc × 1 thread | 10,42 | 11,50 | 7,53 | **6,35** | 6,39 | 10,71 | 13,87 | 28,46 | 42,41 |
+| 8 proc × 1 thread | 11,52 | 11,08 | 7,72 | **3,91** | 4,87 | 6,35 | 7,57 | 16,83 | 25,98 |
 
-| worker (a k=192) | 1 | 2 | 3 | 4 |
+**La curva ha un minimo interno, e non è agli estremi.** A sinistra mancano processi a cui
+dare lavoro: a `k=1` una partizione sola sta su un worker solo e gli altri guardano. A
+destra ogni partizione aggiunge coordinamento — quattro riduzioni moltiplicate per il
+numero di task — su 34 MB di dati che non ne hanno bisogno.
+
+**`k=8` è il default scelto.** Vince o pareggia in tutte e tre le configurazioni: è il
+minimo a `4×1`, è dentro il rumore del minimo a `4×2`, ed è il minimo **netto** a `8×1`,
+dove `k=16` costa il 24% in più (3,91 contro 4,87 s, con dispersioni del 3–6%: sei
+deviazioni standard, non rumore). A otto processi `k=8` è *una partizione per processo*,
+ma la stessa regola a quattro processi darebbe `k=4`, che è peggio di `k=8` (7,53 contro
+6,35): **è un numero misurato, non una formula**, ed è per questo che nel codice c'è una
+costante e non un conto sul numero di worker.
+
+**Il default di partenza era il punto peggiore della curva.** «Una partizione per file»
+ricalca il layout su disco ed è la scelta trasparente, ma costa **6,5 volte** il minimo
+sullo stesso cluster.
+
+#### Curva 2 — tempo contro numero di worker
+
+Misurata a `k=16`, cioè dentro il plateau, con 2 thread per worker:
+
+| worker | 1 | 2 | 3 | 4 |
 |---|---:|---:|---:|---:|
-| secondi | 29,82 | 20,03 | 16,08 | 14,25 |
-| speedup | 1,00 | 1,49 | 1,85 | **2,09** |
+| secondi | 19,19 | 11,34 | 7,88 | 6,62 |
+| speedup | 1,00 | 1,69 | 2,43 | **2,90** |
+| efficienza | 1,00 | 0,84 | 0,81 | 0,72 |
 
-**pandas, un core: 3,93 s.**
+La stessa curva misurata a `k=192` — il default di partenza — dà **2,48×**. Il punto in cui
+si misura lo speedup non è neutro: dove il job è fatto quasi solo di coordinamento, il
+parallelismo ha meno da mordere e la misura **sottostima**.
 
-1. **La curva sulle partizioni ha un minimo, e non è agli estremi.** A sinistra mancano
-   processi a cui dare lavoro (a `k=1` un core solo legge tutto); a destra ogni partizione
-   in più aggiunge coordinamento — quattro stadi di shuffle moltiplicati per il numero di
-   task. Il minimo è a `k=8`, e `k=192` costa **7,9 volte** tanto.
-2. **Il default «una partizione per file» è il punto peggiore della curva.** È trasparente
-   (ricalca i file su disco) ma non è quello giusto: va scelto con la misura, e sul cluster
-   vero va rifatta perché lì di mezzo c'è la rete.
-3. **Al punto giusto, distribuire paga: 1,81 s contro i 3,93 s di un core, cioè 2,2×.**
-   Con 12 thread, quindi l'efficienza resta bassa e il job è ancora dominato dal
-   coordinamento — ma non è più *sotto* il baseline.
+#### Processi contro thread, a parità di core
 
-**Il confronto col 2.3.1, che è il motivo per cui questi due benchmark stanno insieme.**
-Prima di `chiave()` questo task non faceva quasi nulla per riga: il suo punto migliore era
-**1,7× più lento** di un core, e il default 46× più lento. Aggiungendo il lavoro per riga
-che la correttezza richiedeva, lo stesso codice sullo stesso hardware è passato a **2,2×
-più veloce**. È la stessa lezione che il 2.3.1 dà dall'altro lato — là 3,56 GB e 2,74× su
-4 worker: **quel che decide se distribuire conviene non è la dimensione del cluster, ma
-quanto lavoro c'è per riga di dati.** Qui l'abbiamo visto cambiare in diretta.
+Tutte le configurazioni a `k=16`, per poterle confrontare:
+
+| processi × thread | core del cluster | secondi | vs un core |
+|---|---:|---:|---:|
+| 1 × 2 | 2 | 19,19 | 0,73× |
+| 2 × 2 | 4 | 11,34 | 1,24× |
+| 3 × 2 | 6 | 7,88 | 1,79× |
+| **4 × 1** | **4** | **6,67** | 2,12× |
+| 4 × 2 | 8 | 6,62 | 2,13× |
+| **8 × 1** | **8** | **4,97** | **2,84×** |
+
+**Il secondo thread non vale niente; il secondo processo vale 1,34×.** Partendo da `4×1`,
+raddoppiare i core dando un thread in più a ogni worker rende **1,01×** — zero. Raddoppiarli
+dando processi in più rende **1,34×**. Stesso hardware aggiunto, due destini opposti.
+
+**A parità di core i processi vincono sempre:** su 8 core `8×1` batte `4×2` di **1,33×**,
+su 4 core `4×1` batte `2×2` di **1,70×**.
+
+**Ed è il GIL.** Il GIL è il lucchetto che lascia eseguire bytecode Python a un solo thread
+per processo alla volta; `re.sub` e `lower()`, che sono il lavoro per riga di questo task,
+non lo rilasciano mai. Girando il conto di Amdahl al contrario, la frazione di lavoro che
+due thread nello stesso processo riescono davvero a spartirsi è **~1,5%**: tutto il resto
+è seriale dentro il processo. La lettura Parquet il lucchetto lo rilascerebbe, perché
+Arrow è C++, ma a `k=8`–`16` è troppo poca cosa per vedersi.
+
+L'ipotesi scritta prima di misurare diceva «i processi vincono, ma meno nettamente del
+2.3.1»: là `8×1` batteva `4×2` di **2,03×**, qui di **1,33×**. Direzione e ordine di
+grandezza giusti. La differenza è che nel 2.3.1 i thread **rallentavano** (`T(4)/T(1) =
+1,31`), mentre qui sono **inerti** — e la conferma non è un punto solo: le curve `4×1` e
+`4×2` si sovrappongono entro il ±6% su **tutti e nove** i valori di `k`, con metà dei core.
+L'unica eccezione è `k=1`, dove il secondo thread fa danno (15,56 contro 10,42 s).
+
+#### La conseguenza pratica, che è la parte scomoda
+
+Il cluster ha 8 core. Con `4 worker × 2 thread`, che è il default di `SSHCluster` e la
+configurazione con cui abbiamo misurato tutto all'inizio, **ne lavorano davvero 4**: metà
+cluster sta a guardare. Per usarlo tutto servono **8 worker da 1 thread**, cioè un worker
+per core — la ricetta con `CORD19_HOSTS` qui sopra.
+
+Messi in fila i due pomelli: **8 processi × 1 thread a `k=8` → 3,91 s**, contro i **41,09 s**
+della configurazione di partenza (4×2 thread, una partizione per file). Stesso hardware,
+stesso codice: **10,5×**. E contro un core solo della stessa macchina, **3,62×**.
+
+### Il confronto col 2.3.1, che è il motivo per cui questi benchmark stanno insieme
+
+Prima che `chiave()` aggiungesse il lavoro per riga che la correttezza richiedeva, questo
+task non faceva quasi nulla per riga: il suo punto migliore era **1,7× più lento** di un
+core solo, e il default 46× più lento. Con quel lavoro in più, lo stesso codice sullo
+stesso hardware è passato a **essere più veloce** di un core. Il 2.3.1 dice la stessa cosa
+dall'altro lato: 3,56 GB, 12,4 milioni di paragrafi, 2,74× su 4 worker.
+
+**Quel che decide se distribuire conviene non è la taglia del cluster, ma quanto lavoro c'è
+per riga di dati** — e su questo task l'abbiamo visto cambiare in diretta.
+
+I numeri del Mac (`LocalCluster`, 4 worker × 3 thread) restano nel CSV e raccontano la
+stessa storia a un'altra scala: minimo a `k=8` (1,81 s), `k=192` a 14,25 s, pandas 3,93 s.
+Non sono confrontabili con quelli della VM — i core delle *medium* sono molto più lenti —
+ma il **rapporto** fra Dask al punto giusto e un core solo è lo stesso: 2,2× là, 2,1× qui.
 
 ## Limiti noti
 
@@ -268,12 +343,15 @@ quanto lavoro c'è per riga di dati.** Qui l'abbiamo visto cambiare in diretta.
 
 ## Aperto
 
-- **La campagna sul cluster vero** (5 × medium, 4 worker) non è ancora girata: un run
-  singolo là costa 39,6 s contro i 13,4 s del Mac, perché il coordinamento passa dalla rete.
-- **Il default di `--partitions` va deciso su quei numeri, non su questi.** Sul Mac il
-  minimo è `k=8`; con quattro macchine il compromesso è un altro.
-- **La curva sui worker è misurata a `k=192`**, cioè al default, che è il punto peggiore:
-  lo speedup di 2,09× è quindi una stima per difetto. Quando il `k` giusto sarà scelto
-  sulla misura del cluster, la curva sui worker va rifatta lì.
-- Nessun notebook: se serve, importa `affiliations.py` come `word_count.ipynb` fa col suo
-  modulo. Mai codice duplicato fra i due.
+- **Nessun notebook.** Se serve, importa `affiliations.py` come `word_count.ipynb` fa col
+  suo modulo: mai codice duplicato fra i due.
+- **`cluster.txt` elenca quattro macchine, quindi il default è `4 worker × 2 thread`** —
+  cioè metà cluster fermo. Per i run veri conviene la lista raddoppiata con
+  `CORD19_HOSTS`. Automatizzarlo in `cluster.py` sarebbe una modifica all'unico file
+  condiviso fra i quattro task: **non fatta apposta**, va discussa col gruppo.
+- **La curva sulle partizioni a 8 processi ha un minimo netto e non un plateau**, al
+  contrario di quella a 4. Perché la forma cambi non è spiegato dai dati che abbiamo: è
+  annotato, non capito.
+- **Il fondo classifica degli istituti resta rumore** (67,6% di singleton): unirlo
+  davvero vuol dire entity resolution, fuori scope per dichiarazione di
+  `DATA_DICTIONARY.md`.

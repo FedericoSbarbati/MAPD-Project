@@ -46,6 +46,7 @@ cluster.txt
 # proteggerli dal riclonaggio continuo della repo sul cluster, che ora non avviene.
 # Gitignorati: la repo e' pubblica, e comunque sono 45 MB di report Bokeh.
 risultati/
+Niccolo/
 
 # laboratorio memory-leak locale (WIP, non committare per ora)
 scripts/leaklab.py
