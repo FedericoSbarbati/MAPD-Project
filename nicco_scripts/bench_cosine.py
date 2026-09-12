@@ -77,9 +77,17 @@ DEFAULT_OUT = "~/mapd-out/bench_2_3_4"
 # NIENTE 1 e 2: il picco di una piastrella va come (titoli/k)^2, quindi a 100.000 titoli
 # k=2 chiederebbe ~30 GB per task. I k bassi non sono lenti, sono IRREALIZZABILI.
 # Il 128 c'e' perche' su worker da 7,1 GB con 4 thread il 4 e l'8 sfondano: senza,
-# la curva avrebbe tre punti validi su cinque. A destra il muro non esiste (il picco
+# la curva avrebbe due punti validi su quattro. A destra il muro non esiste (il picco
 # va come 1/k^2) e si misura l'altro estremo, i task troppo piccoli.
-BLOCCHI = (16, 32, 64, 128, 8, 4)
+#
+# k=8 E k=4 SONO USCITI DALLO SWEEP, e sono comunque nel CSV: li ha misurati la
+# calibrazione sul cluster del 2026-09-12, a 100.000 titoli su 4 worker x 4 thread.
+# `k=8` -> KilledWorker su tutti e quattro i worker; `k=4` -> FutureCancelledError, e la
+# riga registra `worker=3`, cioe' il cluster NON si era ripreso dal punto precedente. Il
+# muro e' un fatto binario, non una misura con dispersione: ripeterlo a ogni passata
+# costerebbe minuti e lascerebbe un cluster degradato ai punti dopo di lui. Per rimetterlo
+# (altri titoli -> altro muro) basta aggiungerlo qui in fondo, dov'era.
+BLOCCHI = (16, 32, 64, 128)
 
 # I punti della curva sui thread. Espliciti e non "quanti core ha il nodo", perche' qui il
 # numero di thread E' la variabile misurata.
