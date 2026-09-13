@@ -37,6 +37,7 @@ __pycache__/
 
 # local-only notes
 CLAUDE.md
+docs
 
 # per-machine Dask cluster node list (IP dei worker) — local-only
 cluster.txt
@@ -49,8 +50,6 @@ risultati/
 Niccolo/
 nicco_scripts/embeddings/
 
-# laboratorio memory-leak locale (WIP, non committare per ora)
-scripts/leaklab.py
 
 # sandbox di sviluppo sul Mac: qui si costruiscono i task passo a passo prima di
 # promuoverli nelle cartelle personali — local-only, mai committato

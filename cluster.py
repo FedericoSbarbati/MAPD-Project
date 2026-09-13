@@ -40,12 +40,12 @@ def available_workers(repo_root="."):
 
 def configure_memory():
     """
-    BY THE STUDENT GROUP: CREATED BY CLAUDE CODE TO HELP DEBUG A SUSPECTED MEMORY LEAK.
-    Not useful for the purpose of analysis since the memory leak problem could have been solved just
-    using VM with a large amount of RAM during the conversion from JSON to Parquet.
-    This is not meaningful for the purpose of the analysis and exam but we where still curious to find out why.
+    DISCLAIMER: Created by the student group with Claude Code to investigate a suspected memory leak.
+                This is not relevant to the analysis, as the issue could have been avoided by using a
+                virtual machine with more RAM during the JSON-to-Parquet conversion. It is included
+                only to document the investigation and its underlying cause.
 
-
+                
     Settings that keep worker memory stable during long text-processing jobs.
 
     `MALLOC_TRIM_THRESHOLD_` and `MALLOC_ARENA_MAX` must reach the worker process before
