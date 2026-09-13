@@ -82,7 +82,7 @@ No IP address and no absolute path is written anywhere in the source.
 
 | folder | what is in it |
 |---|---|
-| `Giulia/` | task **2.3.1**, word count — `word_count.py`, `bench_word_count.py` |
+| `Giulia/` | task **2.3.1**, word count — `word_count.py`, `bench_word_count.py`, plus `misura_ram.py` (the extra memory check) |
 | `Federico/` | task **2.3.2**, countries and institutes — `affiliations.py`, `bench_affiliations.py` |
 | `daniele/` | task **2.3.3**, title embeddings — `title_embeddings.py`, and three campaigns (`bench_scaling.py`, `bench_threads.py`, `bench_knobs.py`) sharing `bench_common.py` |
 | `nicco_scripts/` | task **2.3.4**, cosine similarity — `cosine.py`, `bench_cosine.py` |
@@ -113,7 +113,12 @@ something we were in a position to do on our own, so we went through it with Cla
 the growth was reproduced locally, on the real data, and traced to a single line of the
 transform.
 
-None of this is required for the assignment and none of it affects the analysis. The
+We also checked that it does not come back, instead of assuming it: `Giulia/misura_ram.py`
+measures how much memory one word count task needs, outside any cluster. It is an extra
+the assignment does not ask for, and what it shows is an ordinary ceiling — the size of a
+single task — and nothing of what happened during the conversion.
+
+None of this is required for the assignment and none of it changes a result. The
 conversion is a closed phase and is not re-run; the four tasks simply read the Parquet it
 produced. We keep the material in the repository for information only:
 

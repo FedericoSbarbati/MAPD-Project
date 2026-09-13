@@ -1,0 +1,18 @@
+# Dependencies of the four tasks, with the versions the project was written against.
+# On the cluster they are already installed in ~/pyvenv, so there is nothing to install
+# before launching; this file is here to rebuild the environment somewhere else.
+#
+#     pip install -r requirements.txt
+#
+# python on the VMs: 3.10.12
+
+dask[complete]==2026.6.0
+distributed==2026.6.0
+pandas==2.3.3
+numpy==2.2.6
+pyarrow==24.0.0     # reads and writes the Parquet
+matplotlib==3.10.9  # the figures of the tasks and of the notebooks
+bokeh==3.9.1        # needed by performance_report: without it the measure fails at the end
+asyncssh==2.24.0    # SSHCluster (starting the multi-node cluster)
+psutil==7.2.2       # RSS and free memory (Giulia/misura_ram.py); distributed pulls it in anyway
+notebook==7.6.0
