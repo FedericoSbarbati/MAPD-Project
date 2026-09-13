@@ -127,7 +127,10 @@ produced. We keep the material in the repository for information only:
 | `scripts/diag_silver_paragraphs.py` | the diagnosis on the cluster: it establishes that worker memory grows, and rules out the usual suspects. A measuring tool, not part of the pipeline |
 | `scripts/leaklab.py` | the local reproduction: it replays the same transform on the real data and compares the candidate cures one against the other |
 | `scripts/MEMORY_LEAK_REPORT.md` | the report: what was measured, what the cause turned out to be, and what would fix it |
+| `Giulia/misura_ram.py` | the check on the word count: the peak memory of a single task, measured outside any cluster. A benchmark of its own, run once |
 
-The only trace this left in the code that actually runs is `configure_memory()` in
+What this left in the code that actually runs is `configure_memory()` in
 `cluster.py` — two allocator settings applied before the workers are started. They came
 out of this investigation, they cost nothing, and they are commented as such.
+`misura_ram.py` stays as well, but it stands apart from the benchmarks of the four tasks:
+no task imports it, nothing depends on it, and it is not re-run.
