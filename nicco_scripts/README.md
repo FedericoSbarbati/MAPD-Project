@@ -302,25 +302,42 @@ stesso cluster, e dà due numeri diversi:
 | come punto della curva **partizioni** (2° del suo cluster, blocchi nuovi) | 20,98 ± 0,44 |
 | come punto della curva **worker** (5° del suo cluster, `k=32` già girato) | 17,41 ± 0,71 |
 
-**3,57 s di differenza, il 17%, a 10,5 σ.** Non è rumore, ed è spiegabile: `build()` fa
-`client.scatter` dei blocchi, e Dask nomina i dati scatterati con l'**hash del contenuto**.
-Alla seconda misura dello stesso `k` i blocchi sono già sui worker, la chiave coincide e
-**il trasferimento non avviene**. Il conto torna: 120 MB di vettori replicati su 4 worker
-sono ~480 MB, che su rete interna da 1 Gb/s fanno ~3,8 s.
+**3,57 s di differenza, il 17%, a 10,5 σ.** Non è rumore.
 
-Due conferme che è questo e non un generico "riscaldamento": il valore *freddo* di quel
-punto è identico nelle due curve che lo misurano su cluster appena nati
-(`partizioni` 20,98 ± 0,44 e `thread`×4 21,16 ± 0,50), e `k=64`, misurato *dopo* `k=32`
-nello stesso cluster, paga comunque il suo scatter perché i suoi blocchi sono altri.
+> **La spiegazione che avevamo dato è stata falsificata dalla campagna del 2026-09-13.**
+> Avevamo attribuito quei 3,57 s allo `scatter`: Dask nomina i dati scatterati con l'hash
+> del contenuto, quindi alla seconda misura dello stesso `k` i blocchi sarebbero già sui
+> worker e il trasferimento non avverrebbe. Il conto tornava (~480 MB su 1 Gb/s ≈ 3,8 s).
+> **È sbagliata.** Misurando lo stesso punto tre volte di fila nello stesso cluster
+> (`--ripeti-punto 3`), la prima misura **non** è più lenta delle altre, a nessun numero di
+> worker:
+>
+> | worker | 1 | 2 | 3 | 4 | 8 |
+> |---|---|---|---|---|---|
+> | freddo − caldo (s) | −1,95 | −0,05 | +0,36 | −0,05 | +0,11 |
+> | σ | 0,9 | 0,1 | 0,5 | 0,1 | 0,9 |
+>
+> Tutte compatibili con zero. **Lo `scatter` di 120 MB non costa niente di misurabile**, e
+> la previsione «a 8 worker deve costare il doppio» è smentita dal dato che avrebbe dovuto
+> confermarla. Il costo di distribuire i dati, in questo task, non è una voce di spesa.
 
-Conseguenze, entrambe da tenere:
+Resta quindi da spiegare **perché ieri** quel punto fosse più veloce. L'unico effetto di
+questo tipo che la notte ha trovato riguarda il **numero di task**, non i dati:
 
-1. **Lo speedup sui worker è 3,66× e non 4,41×.** Quest'ultimo confronta il valore "caldo"
-   di 4 worker con i valori freddi di 3, 2 e 1 — mele e pere. Tutti i numeri di questa
-   pagina usano il valore omogeneo.
-2. **Quei 3,57 s sono il costo di distribuire i dati, isolato per differenza**: il 17% del
-   job a 4 worker. È dentro il cronometro per scelta dichiarata — è lavoro distribuito, e
-   cresce col numero di worker — e adesso si sa quanto pesa.
+| `k` | 16 | 32 | 64 | 128 |
+|---|---|---|---|---|
+| 1ª misura | 21,83 | 20,49 | 23,95 | **39,05** |
+| misure 2ª-3ª | 21,81 | 21,00 | 22,90 | **34,88** |
+
+A `k=128` — 8.256 task — la prima esecuzione costa **il 10,7% in più**; a `k=16` e `k=32`
+non succede nulla. Ieri il punto "veloce" girava **dopo** `k=64` e `k=128` nello stesso
+cluster, cioè dopo ~10.000 task. L'ipotesi nuova è quindi che a scaldarsi non siano i
+*dati* ma lo *scheduler* o l'allocatore dei worker, e che serva un volume di task per
+vederlo. **Non è verificata**, e la misura che la deciderebbe è corta: nello stesso cluster,
+`k=128` e subito dopo `k=32`, e si guarda se quel `k=32` vale 21 o 17.
+
+**Conseguenza pratica invariata:** lo speedup sui worker resta **3,66×** e non 4,41×,
+perché i due numeri di quel punto non sono confrontabili fra loro qualunque sia la causa.
 
 ### La campagna notturna del 2026-09-13
 
@@ -345,6 +362,29 @@ perché i megabyte trasferiti sono gli stessi. Indizio a favore, già raccolto: 
 
 Durata stimata **5,1 ore** per **274 misure**, dai tempi del 2026-09-12. L'ordine va dal più
 importante al più lungo: se la notte si interrompe, le risposte 1 e 2 sono già al sicuro.
+
+### I risultati della notte (274 misure, 307 minuti)
+
+**La dispersione a un worker è del calcolo, non dell'accensione.** Otto misure a cluster
+fermo × 5 cluster, su ciascuna delle quattro macchine:
+
+| nodo | media | σ | CV |
+|---|---|---|---|
+| 1 | 80,24 | 4,53 | 5,6% |
+| 2 | 85,42 | 4,93 | 5,8% |
+| 3 | 83,64 | 3,67 | 4,4% |
+| 4 | 84,46 | 2,56 | 3,0% |
+
+Le due domande hanno risposta netta. **Non è una macchina difettosa**: le quattro stanno
+entro il 6,5% l'una dall'altra, e tutte disperdono. **Non è l'accensione del cluster**: la
+dispersione *dentro* un cluster fermo (3,19 s in media) è **più grande** di quella *fra*
+cluster diversi (2,21 s) — se fosse l'avvio sarebbe il contrario. E non c'è tendenza: dalla
+1ª all'8ª misura si passa da 84,77 a 82,26 s, dentro il rumore.
+
+Resta quindi che **il punto a un worker è intrinsecamente più rumoroso**: CV 3-5,6% contro
+lo 0,3-2% di tutti gli altri. È l'unica configurazione in cui un solo nodo porta tutto il
+carico, quindi il rumore del suo sistema operativo e della sua banda di memoria non viene
+mediato su quattro macchine. Annotato **con la causa ristretta**, non più solo annotato.
 
 ## Correttezza: verificata una volta, non a ogni run
 
@@ -412,7 +452,45 @@ non è un errore, è la domanda che è mal posta finché gli artefatti restano d
 > classifiche degeneri no. Il calcolo distribuito è riproducibile entro l'errore di macchina,
 > non bit a bit — affermare la seconda cosa sarebbe falso.
 
-**Nessuno dei due è filtrato, per ora.** Se quelle coppie siano *il risultato* o *il rumore*
+### Cosa succede filtrando: misurato, cinque configurazioni
+
+| filtro | coppie a 1,000000 (su 5.000) | a pari merito con la 20ª | similarità minima |
+|---|---|---|---|
+| nessuno | 4.131 | 2.326 | −0,1475 |
+| `--min-parole 2` | 3.357 | 1.758 | −0,1132 |
+| `--min-parole 3` | 2.932 | 1.593 | −0,0542 |
+| `--solo-unici` | 2.162 | 1.246 | −0,1661 |
+| entrambi | **1.902** | **973** | −0,0827 |
+
+I filtri dimezzano la degenerazione, **ma non la eliminano**: con entrambi attivi restano
+1.902 coppie a 1,000000 e 973 a pari merito con la ventesima. La classifica resta una
+scelta fra pari.
+
+**E il motivo è il risultato più interessante della notte.** Guardando i titoli interi
+delle coppie che sopravvivono a entrambi i filtri: **zero su duemila sono identici come
+stringa**. Differiscono per un punto finale, un trattino tipografico, un apostrofo curvo:
+
+```
+"COVID-19 and the epistemology of epidemiological models…": comment from the editors.
+"COVID-19 and the epistemology of epidemiological models…": comment from the editors
+Learning and Leading: The Impact of COVID‐19 in Perioperative Areas     (trattino U+2010)
+Learning and Leading: The Impact of COVID-19 in Perioperative Areas     (trattino ASCII)
+```
+
+Il filtro sui duplicati **ha funzionato**: i titoli ripetuti alla lettera sono spariti.
+Quello che resta sono lo **stesso paper depositato due volte** da fonti diverse (PMC, WHO,
+Elsevier) con differenze di composizione tipografica — che `is_title_unique` non vede,
+perché `title_norm` non le unifica, e che l'embedding non può vedere, perché la
+punteggiatura non entra nella media dei vettori di parola.
+
+Quindi la lettura da dare al risultato **cambia di segno**: la cima della classifica non è
+rumore da ripulire, è **il corpus che contiene migliaia di paper gemelli**, e la similarità
+coseno li trova — che è esattamente il lavoro per cui la si usa. La domanda «quali sono i
+titoli più simili» ha come risposta onesta *«questi ~1.900 sono lo stesso paper due
+volte»*, e solo dopo averlo detto ha senso chiedersi quali siano i più simili **fra paper
+diversi**.
+
+**Nessuno dei due filtri è attivo per default.** Se quelle coppie siano *il risultato* o *il rumore*
 è una decisione di analisi, e il layer `silver` segnala senza decidere
 (`PROJECT_CONTEXT.md` §4): il filtro si aggiunge dopo averne discusso, non per abitudine.
 Le due colonne che servono ci sono già (`is_title_unique`, `n_words`).

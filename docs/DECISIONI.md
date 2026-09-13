@@ -690,3 +690,70 @@ Il costo dello `scatter` a 8 worker non è misurato, quindi l'1,15× dei process
 punto a **un worker** abbia dispersione dell'8 % (70,9 → 87,2 s) contro lo 0,3-2 % di tutti gli
 altri resta **annotato e non capito** · il 2.3.4 non ha notebook · i due `.log` della campagna
 non sono stati scaricati dalla VM (il secondo `rsync` non è passato).
+
+---
+## 2026-09-13 — la notte del 2.3.4: una previsione falsificata e un risultato che cambia segno
+
+**Decisioni + perché**
+Campagna notturna chiusa: **274 misure in 307 minuti**, contro i 308 stimati. Rispondeva alle
+tre domande lasciate aperte ieri; due hanno risposta netta, una ha **smentito noi**.
+**(1) IL COSTO DELLO `scatter` NON ESISTE, e la nostra spiegazione di ieri era sbagliata.**
+Avevamo attribuito i 3,57 s di differenza fra due misure dello stesso punto al trasferimento
+dei blocchi (Dask nomina i dati scatterati con l'hash del contenuto → la seconda misura non
+ritrasferisce), con un conto che tornava: ~480 MB su 1 Gb/s ≈ 3,8 s. Misurando lo **stesso
+punto tre volte di fila nello stesso cluster** (`--ripeti-punto 3`), la prima misura **non è
+più lenta**: freddo − caldo vale −1,95 · −0,05 · +0,36 · −0,05 · +0,11 s a 1, 2, 3, 4, 8
+worker, **tutte entro 1 σ da zero**. La previsione «a 8 worker deve costare il doppio» è
+smentita dal dato che doveva confermarla. **Distribuire 120 MB non costa niente di
+misurabile**, e va tolto dalla lista delle voci di spesa del task.
+L'unico effetto di quel tipo che esiste riguarda il **numero di task, non i dati**: a
+`k=128` (8.256 task) la prima esecuzione costa il **10,7%** in più (39,05 → 34,88), a `k=16`
+e `k=32` nulla. Ieri il punto "veloce" girava dopo `k=64` e `k=128`, cioè dopo ~10.000 task:
+**ipotesi nuova, non verificata** — a scaldarsi sarebbero scheduler o allocatore, non i dati.
+La misura che la decide è corta (nello stesso cluster `k=128` e subito dopo `k=32`: vale 21
+o 17?). Invariato: **lo speedup sui worker resta 3,66×**, perché quei due numeri non sono
+confrontabili qualunque sia la causa.
+**(2) LA DISPERSIONE A UN WORKER È DEL CALCOLO, NON DELL'ACCENSIONE.** Otto misure a cluster
+fermo × 5 cluster × 4 macchine: la σ **dentro** un cluster (3,19 s) è **maggiore** di quella
+**fra** cluster (2,21 s) — se fosse l'avvio sarebbe il contrario — e non c'è tendenza dalla
+1ª all'8ª misura (84,77 → 82,26 s, dentro il rumore). **Non è una macchina difettosa:** le
+quattro stanno entro il **6,5%** (80,24 · 85,42 · 83,64 · 84,46 s) e disperdono tutte
+(CV 3,0-5,8%). Resta che il punto a un worker è **intrinsecamente** più rumoroso degli altri
+(CV 0,3-2%): è l'unica configurazione in cui un solo nodo porta tutto il carico, quindi il
+rumore del suo sistema operativo non viene mediato su quattro macchine. Causa **ristretta**,
+non più solo annotata.
+**(3) I FILTRI: il risultato cambia di segno.** Cinque configurazioni a 100.000 titoli con
+`--top 5000` per contare i pari merito. Coppie a 1,000000: **4.131** (nessun filtro) · 3.357
+(`--min-parole 2`) · 2.932 (`--min-parole 3`) · 2.162 (`--solo-unici`) · **1.902** (entrambi).
+I filtri **dimezzano la degenerazione ma non la eliminano**, e il perché è la scoperta della
+notte: fra le 2.000 coppie che sopravvivono a entrambi i filtri, **ZERO hanno i due titoli
+identici come stringa**. Differiscono per un punto finale, un trattino U+2010 contro ASCII,
+un apostrofo curvo — cioè sono **lo stesso paper depositato due volte** da fonti diverse, che
+`is_title_unique` non vede (`title_norm` non unifica quei caratteri) e che l'embedding non
+**può** vedere (la punteggiatura non entra nella media dei vettori di parola). Quindi la cima
+della classifica **non è rumore da ripulire**: è il corpus che contiene migliaia di paper
+gemelli, e il coseno li trova — che è il lavoro per cui lo si usa. La risposta onesta a
+«quali sono i titoli più simili» è *«questi ~1.900 sono lo stesso paper due volte»*, e solo
+dopo ha senso chiedersi quali siano i più simili **fra paper diversi**. **I filtri restano
+opzioni spente per default:** ora ci sono i numeri per decidere, e la decisione è di chi
+consegna.
+
+**Collegamenti toccati**
+`nicco_scripts/notte_2_3_4.sh` (nuovo: l'elenco dei comandi della notte, nessuna logica;
+ordine dal più importante al più lungo perché una notte può interrompersi) →
+`bench_cosine.py` (+`--ripeti-punto N` e colonna **`misura`**: `misura=0` è la prima volta che
+quel `k` gira in quel cluster — serviva a isolare lo scatter e a separare la varianza a
+cluster fermo da quella fra accensioni; +`--no-baseline`, perché 102 s a passata sarebbero
+stati la maggior parte di una campagna che ripete un punto solo) · `cosine.py`
+(+`--min-parole`, +`--solo-unici`, +`eligible_uids` che converte il vocabolario **una volta**
+in `pyarrow.Array` per `pc.is_in` — l'hotspot di `MEMORY_LEAK_REPORT.md`) ·
+`nicco_scripts/README.md` (la sezione sullo scatter **corretta**, non cancellata: la
+spiegazione sbagliata resta scritta accanto alla misura che la smentisce) ·
+`risultati/cosine/notte/` (git-ignored).
+
+**Thread aperti**
+Perché la prima esecuzione a `k=128` costi il 10,7% in più: ipotesi scheduler/allocatore,
+misura decisiva da 6 minuti mai fatta · il 2.3.4 non ha notebook (deciso: non si fa) · la
+scelta se filtrare resta **aperta e ora informata**: senza filtri si consegna «il corpus ha
+migliaia di gemelli», con i filtri «fra paper diversi i più simili sono questi» — sono due
+risposte diverse alla stessa domanda, ed entrambe sono difendibili.
