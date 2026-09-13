@@ -1,0 +1,11 @@
+curva,valore,ripetizione,secondi,errore,partizioni,split_out,file,worker,thread,picco_gb,picco_medio_gb
+riferimento,8,0,204.7,,256,16,1979,5,5,1.72,1.48
+partizioni,512,0,210.0,,512,16,1979,5,5,1.55,1.32
+partizioni,128,0,207.1,RuntimeError: Patched curdoc has been previously destroyed,128,16,1979,5,5,,
+partizioni,1024,0,220.9,,1024,16,1979,5,5,1.55,1.29
+partizioni,64,0,,"KilledWorker: Attempted to run task ('document_counts-from-bag-to_dataframe-chunk-reset_index-operation-febac5231844102cc8e98f10acd91479', 4) on 4 different workers, but all those workers died while r",64,16,1979,5,5,,
+partizioni,1979,0,236.2,,1979,16,1979,5,5,1.47,1.31
+partizioni,32,0,,"KilledWorker: Attempted to run task ('document_counts-from-bag-to_dataframe-chunk-reset_index-operation-c3ef68764d23ab3c685c1e5823d88430', 18) on 4 different workers, but all those workers died while ",32,16,1979,5,5,,
+partizioni,16,0,,"KilledWorker: Attempted to run task ('document_counts-from-bag-to_dataframe-chunk-reset_index-operation-3c066f57b769e4757a32f16d2d18b40d', 1) on 4 different workers, but all those workers died while r",16,16,1979,5,5,,
+partizioni,8,0,,"KilledWorker: Attempted to run task ('document_counts-from-bag-to_dataframe-chunk-reset_index-operation-fc19da77efe0f958c5c13f044be72c6a', 4) on 4 different workers, but all those workers died while r",8,16,1979,5,5,,
+partizioni,4,0,,"KilledWorker: Attempted to run task ('document_counts-from-bag-to_dataframe-chunk-reset_index-operation-8b9417da7f2a9a4911759d79936e8a2e', 3) on 4 different workers, but all those workers died while r",4,16,1979,5,5,,

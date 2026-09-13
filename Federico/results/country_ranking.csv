@@ -1,0 +1,207 @@
+entity,papers,authors
+United States,50351,257902
+China,28398,180235
+United Kingdom,21461,95983
+Italy,16864,103302
+Germany,12218,56607
+Canada,10207,41826
+India,10101,40377
+Spain,9284,47914
+France,8675,44179
+Australia,8532,32493
+Japan,6587,35188
+Brazil,6144,35958
+Netherlands,5184,22074
+South Korea,4557,19362
+Iran,4495,21490
+Switzerland,4293,17831
+Saudi Arabia,3266,11174
+Türkiye,3246,13787
+Poland,3153,11586
+Sweden,3035,10720
+Belgium,3014,11990
+Taiwan,2795,13013
+Israel,2409,10775
+Austria,2355,10075
+Greece,2125,9314
+South Africa,2082,7163
+Portugal,2058,7270
+Singapore,2057,8412
+Denmark,2012,8062
+Pakistan,1985,6829
+Russia,1966,7571
+Ireland,1911,6938
+Egypt,1857,6797
+Malaysia,1849,6564
+Mexico,1577,6979
+Bangladesh,1489,6258
+Norway,1387,4413
+Finland,1334,4811
+Thailand,1322,5062
+Nigeria,1131,4173
+Indonesia,1098,4994
+Ethiopia,1008,4676
+Chile,998,3691
+Colombia,985,3899
+Romania,968,3306
+United Arab Emirates,940,2828
+New Zealand,920,2614
+Argentina,904,4094
+Qatar,862,4247
+Hungary,759,3161
+Czechia,752,2420
+Jordan,659,2271
+Vietnam,600,2663
+Croatia,592,2198
+Kenya,569,2275
+Peru,529,1944
+Morocco,525,2672
+Ghana,497,1865
+Philippines,489,1526
+Slovenia,460,1423
+Nepal,425,1429
+Uganda,414,1950
+Lebanon,411,1406
+Serbia,390,1450
+Iraq,377,1070
+Tunisia,370,1374
+Ecuador,348,1309
+Cyprus,332,821
+Georgia,327,1105
+Slovakia,323,1142
+Kuwait,264,881
+Oman,244,775
+Lithuania,236,822
+Ukraine,234,644
+Cameroon,222,878
+Estonia,217,637
+Algeria,204,667
+Tanzania,201,620
+Bulgaria,192,520
+Luxembourg,190,553
+Sri Lanka,178,915
+Sudan,161,509
+Zambia,151,560
+Uruguay,146,726
+Zimbabwe,142,437
+Malawi,137,617
+Kazakhstan,124,383
+Palestine,123,370
+Bahrain,118,363
+Afghanistan,111,233
+Malta,111,277
+Latvia,109,363
+Cuba,108,468
+Rwanda,105,285
+Iceland,102,494
+Venezuela,102,323
+Senegal,93,321
+Cambodia,85,401
+Botswana,75,214
+Yemen,74,99
+DR Congo,67,211
+Syria,67,216
+Congo Republic,64,256
+Jamaica,61,179
+Albania,57,139
+Mali,57,175
+Panama,56,221
+Madagascar,55,309
+Mozambique,54,131
+Gambia,53,212
+Belarus,50,120
+Armenia,46,144
+North Macedonia,46,107
+Paraguay,46,108
+Benin,44,119
+Gabon,40,165
+Guinea,39,153
+Namibia,39,87
+Honduras,38,81
+Mauritius,38,78
+Dominican Republic,36,102
+Myanmar,36,68
+Fiji,35,101
+Macau,34,125
+Bosnia and Herzegovina,33,85
+Barbados,31,101
+Bhutan,31,72
+Guatemala,28,56
+Jersey,28,98
+Mongolia,27,131
+Uzbekistan,26,46
+Liberia,25,69
+Grenada,24,42
+Niger,23,65
+Azerbaijan,22,59
+Liechtenstein,19,79
+Nicaragua,19,82
+Haiti,18,35
+Togo,18,105
+Somalia,17,40
+Angola,15,70
+Burkina Faso,15,33
+Kyrgyzstan,15,36
+Papua New Guinea,15,46
+Laos,12,51
+Costa Rica,11,65
+French Guiana,11,55
+Montenegro,11,15
+Gibraltar,10,27
+Libya,10,16
+Monaco,10,49
+Guadeloupe,9,25
+Lesotho,9,15
+Samoa,9,19
+Seychelles,8,37
+Burundi,7,15
+Chad,7,9
+Eswatini,7,34
+Guyana,7,13
+Maldives,7,36
+Martinique,7,11
+Puerto Rico,7,23
+Suriname,7,23
+Andorra,6,18
+Aruba,6,10
+Bahamas,6,15
+Djibouti,6,11
+French Polynesia,6,34
+Bolivia,5,8
+Brunei Darussalam,5,12
+Guinea-Bissau,5,9
+Mauritania,5,15
+New Caledonia,5,11
+Réunion,4,11
+Sao Tome and Principe,4,8
+Faroe Islands,3,6
+Solomon Islands,3,7
+South Sudan,3,3
+Vanuatu,3,3
+Antigua and Barbuda,2,3
+Belize,2,3
+Central African Republic,2,17
+Comoros,2,3
+Eritrea,2,2
+Kiribati,2,5
+North Korea,2,2
+Palau,2,2
+South Georgia and South Sandwich Is.,2,7
+St. Lucia,2,5
+Tajikistan,2,3
+Anguilla,1,1
+Bermuda,1,4
+Cabo Verde,1,1
+Cayman Islands,1,1
+Dominica,1,1
+Greenland,1,1
+Guam,1,3
+Guernsey,1,1
+Hong Kong,1,3
+Kosovo,1,1
+Moldova,1,9
+Montserrat,1,2
+St. Helena,1,1
+Tonga,1,1
+Trinidad and Tobago,1,1
+United States Virgin Islands,1,5

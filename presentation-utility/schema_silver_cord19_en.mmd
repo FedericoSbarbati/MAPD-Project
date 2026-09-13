@@ -1,0 +1,54 @@
+erDiagram
+    papers {
+        string cord_uid PK "unique after dedup"
+        string title "482 null"
+        string title_norm "matching key"
+        int32 title_dup_count "max 82"
+        bool is_title_unique "28.0% false"
+        bool title_ok "present and >= 3 chars"
+        string abstract "21.35% null"
+        int16 year "from publish_time[:4]"
+        bool has_pdf "373,750"
+        bool has_pmc "315,726"
+        string passthrough[13] "bibliographic columns, kept as-is"
+    }
+
+    paragraphs {
+        string cord_uid FK "never null"
+        string paper_id "sha or pmcid"
+        string source "pmc or pdf, never both"
+        int32 para_idx "position in the document"
+        string section "raw, not a category"
+        string text "verbatim, never null - task 2.3.1"
+        bool is_reference_like "1.90% - flag, not a filter"
+    }
+
+    authors {
+        string cord_uid FK "pdf_json branch only"
+        string paper_id "sha"
+        int32 author_idx "author position"
+        string institution "51.68% non-null"
+        string institution_norm "lightly normalized"
+        string country_raw "46.01% non-null, dirty"
+        string country_iso3 "canonical, 99.33% resolved"
+        string country "short name"
+        string settlement "city"
+    }
+
+    paper_countries {
+        string cord_uid FK "214,799 papers"
+        string country_iso3 "unique per paper"
+        string country "task 2.3.2"
+    }
+
+    paper_institutions {
+        string cord_uid FK "237,184 papers"
+        string institution_norm "unique per paper - task 2.3.2"
+    }
+
+    papers ||--o{ paragraphs : "1 row per paragraph"
+    papers ||--o{ authors : "1 row per author"
+    papers ||--o{ paper_countries : "1 row per country"
+    papers ||--o{ paper_institutions : "1 row per institution"
+    authors }o..o| paper_countries : "distinct rollup"
+    authors }o..o| paper_institutions : "distinct rollup"

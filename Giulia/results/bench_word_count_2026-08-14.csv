@@ -1,0 +1,28 @@
+curva,valore,ripetizione,secondi,errore,partizioni,split_out,file,worker,thread
+riferimento,4,0,501.9,,256,16,1979,4,16
+riferimento,4,1,496.1,,256,16,1979,4,16
+riferimento,4,2,494.7,,256,16,1979,4,16
+worker,3,0,622.1,,256,16,1979,3,12
+worker,2,0,846.6,,256,16,1979,2,8
+worker,1,0,1365.7,,256,16,1979,1,4
+partizioni,512,0,489.8,,512,16,1979,4,16
+partizioni,128,0,508.8,,128,16,1979,4,16
+partizioni,1024,0,518.2,,1024,16,1979,4,16
+partizioni,64,0,,"KilledWorker: Attempted to run task ('document_counts-from-bag-to_dataframe-chunk-reset_index-operation-febac5231844102cc8e98f10acd91479', 40) on 4 different workers, but all those workers died while ",64,16,1979,4,16
+partizioni,1979,0,536.6,,1979,16,1979,4,16
+partizioni,32,0,,"KilledWorker: Attempted to run task ('document_counts-from-bag-to_dataframe-chunk-reset_index-operation-c3ef68764d23ab3c685c1e5823d88430', 18) on 4 different workers, but all those workers died while ",32,16,1979,4,16
+partizioni,16,0,,"KilledWorker: Attempted to run task ('document_counts-from-bag-to_dataframe-chunk-reset_index-operation-3c066f57b769e4757a32f16d2d18b40d', 9) on 4 different workers, but all those workers died while r",16,16,1979,4,16
+partizioni,8,0,,"KilledWorker: Attempted to run task ('document_counts-from-bag-to_dataframe-chunk-reset_index-operation-fc19da77efe0f958c5c13f044be72c6a', 5) on 4 different workers, but all those workers died while r",8,16,1979,4,16
+partizioni,4,0,,"KilledWorker: Attempted to run task ('document_counts-from-bag-to_dataframe-chunk-reset_index-operation-8b9417da7f2a9a4911759d79936e8a2e', 0) on 4 different workers, but all those workers died while r",4,16,1979,4,16
+thread,2,0,406.2,,256,16,1979,4,8
+thread,1,0,379.8,,256,16,1979,4,4
+foldby,0,0,1091.4,,256,0,1979,4,16
+partizioni,512,0,394.1,,512,16,1979,4,4
+partizioni,128,0,387.5,,128,16,1979,4,4
+partizioni,1024,0,411.7,,1024,16,1979,4,4
+partizioni,64,0,397.9,,64,16,1979,4,4
+partizioni,1979,0,432.8,,1979,16,1979,4,4
+partizioni,32,0,424.3,AttributeError: 'DocumentCallbackManager' object has no attribute '_js_event_callbacks',32,16,1979,4,4
+partizioni,16,0,,"KilledWorker: Attempted to run task ('document_counts-from-bag-to_dataframe-chunk-reset_index-operation-3c066f57b769e4757a32f16d2d18b40d', 0) on 4 different workers, but all those workers died while r",16,16,1979,4,4
+partizioni,8,0,,"KilledWorker: Attempted to run task ('document_counts-from-bag-to_dataframe-chunk-reset_index-operation-fc19da77efe0f958c5c13f044be72c6a', 1) on 4 different workers, but all those workers died while r",8,16,1979,4,4
+partizioni,4,0,,"KilledWorker: Attempted to run task ('document_counts-from-bag-to_dataframe-chunk-reset_index-operation-8b9417da7f2a9a4911759d79936e8a2e', 0) on 4 different workers, but all those workers died while r",4,16,1979,4,4

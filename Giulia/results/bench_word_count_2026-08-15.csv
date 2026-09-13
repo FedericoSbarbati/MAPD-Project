@@ -1,0 +1,49 @@
+curva,valore,ripetizione,secondi,errore,partizioni,split_out,file,worker,thread,picco_gb,picco_medio_gb
+riferimento,4,0,386.4,,256,16,1979,4,4,2.44,1.94
+partizioni,512,0,403.5,,512,16,1979,4,4,2.39,1.82
+partizioni,128,0,381.6,,128,16,1979,4,4,2.56,2.43
+partizioni,1024,0,425.1,,1024,16,1979,4,4,2.43,2.04
+partizioni,64,0,389.0,,64,16,1979,4,4,3.72,3.53
+partizioni,1979,0,441.5,,1979,16,1979,4,4,2.62,2.25
+partizioni,32,0,423.1,,32,16,1979,4,4,6.41,5.97
+partizioni,16,0,,"KilledWorker: Attempted to run task ('document_counts-from-bag-to_dataframe-chunk-reset_index-operation-3c066f57b769e4757a32f16d2d18b40d', 14) on 4 different workers, but all those workers died while ",16,16,1979,4,4,,
+partizioni,8,0,,"KilledWorker: Attempted to run task ('document_counts-from-bag-to_dataframe-chunk-reset_index-operation-fc19da77efe0f958c5c13f044be72c6a', 0) on 4 different workers, but all those workers died while r",8,16,1979,4,4,,
+partizioni,4,0,,"KilledWorker: Attempted to run task ('document_counts-from-bag-to_dataframe-chunk-reset_index-operation-8b9417da7f2a9a4911759d79936e8a2e', 3) on 4 different workers, but all those workers died while r",4,16,1979,4,4,,
+worker,3,0,498.9,,256,16,1979,3,3,2.36,2.24
+worker,2,0,713.5,,256,16,1979,2,2,3.13,2.77
+worker,1,0,1256.1,,256,16,1979,1,1,4.25,4.25
+thread,4,0,514.4,,256,16,1979,4,16,3.72,3.19
+thread,2,0,418.7,,256,16,1979,4,8,2.86,2.51
+foldby,0,0,1185.3,,256,0,1979,4,4,3.93,3.14
+riferimento,4,1,382.0,,256,16,1979,4,4,2.21,1.92
+partizioni,512,1,405.6,,512,16,1979,4,4,2.39,1.97
+partizioni,128,1,392.1,,128,16,1979,4,4,2.78,2.57
+partizioni,1024,1,424.3,,1024,16,1979,4,4,2.5,2.15
+partizioni,64,1,405.6,,64,16,1979,4,4,4.08,3.68
+partizioni,1979,1,450.4,,1979,16,1979,4,4,2.25,2.15
+partizioni,32,1,460.3,,32,16,1979,4,4,6.53,6.09
+partizioni,16,1,,"KilledWorker: Attempted to run task ('document_counts-from-bag-to_dataframe-chunk-reset_index-operation-3c066f57b769e4757a32f16d2d18b40d', 14) on 4 different workers, but all those workers died while ",16,16,1979,4,4,,
+partizioni,8,1,,"KilledWorker: Attempted to run task ('document_counts-from-bag-to_dataframe-chunk-reset_index-operation-fc19da77efe0f958c5c13f044be72c6a', 1) on 4 different workers, but all those workers died while r",8,16,1979,4,4,,
+partizioni,4,1,,"KilledWorker: Attempted to run task ('document_counts-from-bag-to_dataframe-chunk-reset_index-operation-8b9417da7f2a9a4911759d79936e8a2e', 2) on 4 different workers, but all those workers died while r",4,16,1979,4,4,,
+worker,3,1,494.6,,256,16,1979,3,3,2.34,2.2
+worker,2,1,705.2,,256,16,1979,2,2,3.07,2.77
+worker,1,1,1263.1,,256,16,1979,1,1,4.26,4.26
+thread,4,1,515.2,,256,16,1979,4,16,3.7,3.26
+thread,2,1,411.9,,256,16,1979,4,8,2.67,2.51
+foldby,0,1,1310.9,,256,0,1979,4,4,3.83,3.26
+riferimento,4,2,387.2,,256,16,1979,4,4,2.17,2.05
+partizioni,512,2,403.0,,512,16,1979,4,4,2.09,1.84
+partizioni,128,2,386.1,,128,16,1979,4,4,2.59,2.36
+partizioni,1024,2,416.1,,1024,16,1979,4,4,2.46,2.02
+partizioni,64,2,409.8,,64,16,1979,4,4,3.57,3.4
+partizioni,1979,2,447.8,,1979,16,1979,4,4,2.47,2.33
+partizioni,32,2,428.9,,32,16,1979,4,4,6.28,5.83
+partizioni,16,2,,"KilledWorker: Attempted to run task ('document_counts-from-bag-to_dataframe-chunk-reset_index-operation-3c066f57b769e4757a32f16d2d18b40d', 13) on 4 different workers, but all those workers died while ",16,16,1979,4,4,,
+partizioni,8,2,,"KilledWorker: Attempted to run task ('document_counts-from-bag-to_dataframe-chunk-reset_index-operation-fc19da77efe0f958c5c13f044be72c6a', 1) on 4 different workers, but all those workers died while r",8,16,1979,4,4,,
+partizioni,4,2,,"KilledWorker: Attempted to run task ('document_counts-from-bag-to_dataframe-chunk-reset_index-operation-8b9417da7f2a9a4911759d79936e8a2e', 3) on 4 different workers, but all those workers died while r",4,16,1979,4,4,,
+worker,3,2,496.5,,256,16,1979,3,3,2.44,2.26
+worker,2,2,716.0,,256,16,1979,2,2,3.13,2.88
+worker,1,2,1265.2,,256,16,1979,1,1,4.29,4.29
+thread,4,2,518.4,,256,16,1979,4,16,3.25,3.08
+thread,2,2,418.0,,256,16,1979,4,8,2.53,2.34
+foldby,0,2,1138.7,,256,0,1979,4,4,3.88,3.2
