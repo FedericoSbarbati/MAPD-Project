@@ -1,45 +1,14 @@
-"""Task 2.3.4 - similarita' coseno fra tutte le coppie di titoli.
-
-    python nicco_scripts/cosine.py nicco_scripts/embeddings --titoli 100000 --out ~/mapd-out/2_3_4
-
-L'IDEA IN TRE RIGHE. La similarita' coseno fra due vettori e' il loro prodotto scalare
-diviso per le due lunghezze; se si normalizzano i vettori UNA VOLTA (costo N x 300, cioe'
-niente), i denominatori diventano 1 e la similarita' e' il solo prodotto scalare. Allora
-"tutte le coppie" non e' un doppio ciclo: e' la moltiplicazione di matrici S = X @ X.T,
-che NumPy passa a BLAS (C/Fortran, centinaia di miliardi di operazioni al secondo).
-
-COME SI DISTRIBUISCE. Le N righe si tagliano in k blocchi; la PIASTRELLA (i,j) e'
-X[i] @ X[j].T, un task che non ha bisogno di nessun altro. S e' simmetrica, quindi si
-calcolano solo le piastrelle con i <= j: k(k+1)/2 task.
-
-IL PUNTO CHE DA' FORMA A TUTTO IL FILE: il risultato e' piu' grande dell'input. A 100.000
-titoli i vettori sono 120 MB ma S sarebbe 40 GB, e sul corpus intero 3,7 TB. Non si scrive
-e non serve: la consegna chiede di IDENTIFICARE alcune coppie estreme, non di conservarle
-tutte. Quindi ogni piastrella RIDUCE SUL POSTO - top 20, bottom 20, istogramma - e
-restituisce 40 righe invece di milioni di numeri. E' un Map/Reduce, ed e' ESATTO: la
-coppia globalmente piu' simile e' per forza la piu' simile della propria piastrella.
-
-Conseguenza pratica: qui i dati si REPLICANO e si distribuisce il CALCOLO (l'opposto del
-word count), quindi gli embedding servono solo sulla macchina da cui si lancia.
-
-Perche' `delayed` e non le altre collezioni: un DataFrame farebbe "tutte le coppie" con un
-cross join, cioe' materializzando 470 miliardi di righe; un Bag avrebbe come elementi
-coppie di indici, non dati, e aggiungerebbe una manopola (`npartitions`) che nei benchmark
-si confonde con k; `dask.array` calcolerebbe tutte e k^2 le piastrelle, perche' non sa che
-S e' simmetrica. -> nicco_scripts/README.md
-"""
-
 import argparse
 import os
 import sys
 import time
 from pathlib import Path
 
-# UN thread BLAS per task. BLAS si auto-parallelizza e di default si prende tutti i core:
-# con 4 worker che moltiplicano insieme sarebbero 16 thread su 4 core a pestarsi i piedi,
-# e il confronto processi/thread misurerebbe quel caos invece di Dask. Il parallelismo qui
-# lo fa Dask, non BLAS. Va impostato PRIMA che numpy carichi la libreria: per i processi
-# worker, che nascono dopo, ci pensa `single_thread_blas()`.
+# ONE BLAS thread per task. BLAS auto-parallelizes and by default grabs all cores:
+# with 4 workers multiplying together that would be 16 threads on 4 cores tripping
+# over each other, and the process/thread comparison would measure that chaos instead of Dask.
+# The parallelism here is done by Dask, not BLAS. It must be set BEFORE numpy loads the
+# library: for the worker processes, which are spawned later, `single_thread_blas()` takes care of it.
 for _variabile in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS",
                    "MKL_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
     os.environ.setdefault(_variabile, "1")
@@ -52,19 +21,19 @@ DEFAULT_INPUT = "nicco_scripts/embeddings"
 DEFAULT_PAPERS = "data/silver/papers"
 DEFAULT_OUTPUT = "~/mapd-out/2_3_4"
 
-# La frazione di corpus su cui si lavora. Il costo va come N^2: 969.021 titoli sono 4,7e11
-# coppie, misurabili una volta ma non decine di volte in una campagna. 100.000 (circa N/10)
-# costano 69,6 s su un core del Mac e ~20-30 s sul cluster pieno: abbastanza per misurare
-# calcolo vero e non coordinamento.
+# The fraction of the corpus being worked on. The cost scales as N^2: 969,021 titles are
+# 4.7e11 pairs, measurable once but not dozens of times in a campaign. 100,000 (roughly N/10)
+# cost 69.6 s on a Mac core and ~20-30 s on the full cluster: enough to measure
+# actual computation rather than coordination overhead.
 DEFAULT_TITLES = 100_000
 
-# In quanti blocchi si tagliano le righe. NON e' solo granularita' di parallelismo: e'
-# anche il picco di memoria per task, che va come (N/k)^2. Vedi `top_block`.
+# How many blocks the rows are cut into. It's NOT just parallelism granularity: it's
+# also the memory peak per task, which scales as (N/k)^2. See `top_block`.
 #
-# 32 e' MISURATO sul cluster (2026-09-12, 6 passate), ma non per il tempo: su k=16 guadagna
-# il 3,4% a 2,1 sigma, che da solo non deciderebbe niente. Decide il picco per task, quattro
-# volte piu' basso (0,12 GB contro 0,47), perche' a 100.000 titoli k=8 e k=4 sfondano e
-# uccidono i worker. Il default costa uguale e sta DUE passi dal muro invece di uno.
+# 32 was MEASURED on the cluster (2026-09-12, 6 runs), but not for the time: at k=16 it
+# gains 3.4% at 2.1 sigma, which alone wouldn't settle anything. What decides it is the
+# peak per task, four times lower (0.12 GB vs 0.47), because at 100,000 titles k=8 and k=4
+# blow up and kill the workers. The default costs the same and sits TWO steps from the wall instead of one.
 DEFAULT_BLOCKS = 32
 
 TOP_N = 20
@@ -75,14 +44,14 @@ VETTORE = [f"v{i}" for i in range(300)]
 
 
 def single_thread_blas():
-    """Le variabili BLAS ai processi worker, che nascono dopo di noi.
+    """The BLAS variables for the worker processes, which are spawned after us.
 
-    Stesso aggancio e stessa ragione di `configure_memory()` in `cluster.py`: devono
-    arrivare al worker QUANDO NASCE, prima che numpy carichi la libreria, e
-    `worker_options={"env": ...}` arriva tardi. `configure_memory` fa `update` sullo
-    stesso dizionario, quindi chiamare questa PRIMA di `get_client` non toglie niente a
-    quella e non obbliga a toccare `cluster.py`, che e' condiviso fra i quattro task.
-    """
+Same hook and same reason as `configure_memory()` in `cluster.py`: they need to
+reach the worker WHEN IT'S SPAWNED, before numpy loads the library, and
+`worker_options={"env": ...}` arrives too late. `configure_memory` does `update` on
+the same dictionary, so calling this BEFORE `get_client` doesn't take anything away
+from that one and doesn't force touching `cluster.py`, which is shared across the four tasks.
+"""
     import dask
     import distributed  # noqa: F401  la chiave nanny nasce quando distributed si importa
 
@@ -92,10 +61,8 @@ def single_thread_blas():
     dask.config.set({"distributed.nanny.pre-spawn-environ": environ})
 
 
-# ----------------------------------------------------------------------------------
-# Lettura e preparazione. Costa pochi secondi ed e' identica in ogni punto delle curve:
-# sta FUORI dal cronometro, come la scrittura dei CSV nel 2.3.2.
-# ----------------------------------------------------------------------------------
+# Reading and preparation. Costs a few seconds and is identical at every point of the
+# curves: it's OUTSIDE the timer, like the CSV writing in 2.3.2.
 
 
 def embedding_files(path):
@@ -108,11 +75,11 @@ def embedding_files(path):
 
 
 def eligible_uids(papers):
-    """I cord_uid dei paper con titolo UNICO, come array Arrow.
+    """The cord_uid of papers with a UNIQUE title, as an Arrow array.
 
-    Convertito UNA volta qui e non per ogni file: `pc.is_in` con un `value_set` Arrow usa
-    il kernel vettorizzato, mentre un `set` Python verrebbe riconvertito a ogni partizione.
-    E' l'hotspot con nome e cognome di `docs/MEMORY_LEAK_REPORT.md` (~170x).
+Converted ONCE here and not per file: `pc.is_in` with an Arrow `value_set` uses
+the vectorized kernel, while a Python `set` would get reconverted on every partition.
+It's the hotspot named and shamed in `docs/MEMORY_LEAK_REPORT.md` (~170x).
     """
     import pyarrow as pa
     import pyarrow.parquet as pq
@@ -123,21 +90,21 @@ def eligible_uids(papers):
 
 
 def load_vectors(path, n_titles=DEFAULT_TITLES, seed=SEED, min_words=0, unici=None):
-    """Un campione di n_titles titoli -> (cord_uid, X).
+    """A sample of n_titles titles -> (cord_uid, X).
 
-    `min_words` scarta i titoli di cui il modello ha riconosciuto meno di N parole:
-    a N=1 non scarta nulla (il minimo nei dati e' 1), a N=2 il 2,24%, a N=3 il 4,96%.
-    `unici` (array Arrow da `eligible_uids`) tiene solo i titoli non duplicati.
-    Entrambi sono spenti per default: sono DECISIONI DI ANALISI, e il layer silver segnala
-    senza decidere. Servono a misurare cosa cambia, non a cambiarlo di nascosto.
+    `min_words` discards titles for which the model recognized fewer than N words:
+    at N=1 it discards nothing (the minimum in the data is 1), at N=2 it's 2.24%, at N=3 it's 4.96%.
+    `unici` (Arrow array from `eligible_uids`) keeps only non-duplicate titles.
+    Both are off by default: they are ANALYSIS DECISIONS, and the silver layer flags
+    without deciding. They're meant to measure what changes, not to change it silently.
 
-    Una QUOTA DA OGNI FILE invece dei primi n_titles: i primi 100.000 starebbero tutti
-    dentro part.0, e l'ordine dei file e' quello con cui il 2.3.3 li ha scritti, non una
-    garanzia di mescolamento. Il seed rende il campione riproducibile, che e' la
-    condizione perche' due misure del benchmark siano confrontabili.
+    A QUOTA FROM EACH FILE instead of the first n_titles: the first 100,000 would all
+    sit inside part.0, and the file order is the one 2.3.3 wrote them in, not a
+    guarantee of shuffling. The seed makes the sample reproducible, which is the
+    condition for two benchmark measurements to be comparable.
 
-    Si legge un file per volta e si tiene solo la sua quota: il picco e' un file (146 MB),
-    non il miliardo e cento dell'intera cartella.
+    Files are read one at a time and only its quota is kept: the peak is one file (146 MB),
+    not the billion-one-hundred of the whole folder.
     """
     import pyarrow.compute as pc
     import pyarrow.parquet as pq
@@ -150,9 +117,9 @@ def load_vectors(path, n_titles=DEFAULT_TITLES, seed=SEED, min_words=0, unici=No
         quota = (posizione + 1) * n_titles // len(files) - posizione * n_titles // len(files)
         tabella = pq.read_table(file)
 
-        # I filtri PRIMA del campionamento: si sceglie fra i titoli ammessi, non si
-        # scartano quelli gia' scelti - altrimenti il campione si rimpicciolirebbe e i
-        # tempi non sarebbero piu' confrontabili fra una configurazione e l'altra.
+        # Filters BEFORE sampling: you choose among the eligible titles, you don't
+        # discard ones already chosen - otherwise the sample would shrink and the
+        # timings would no longer be comparable across configurations.
         ammessi = np.flatnonzero(tabella.column("n_words").to_numpy() >= min_words)
         if unici is not None:
             tenere = pc.is_in(tabella.column("cord_uid"), value_set=unici).to_numpy(
@@ -169,46 +136,46 @@ def load_vectors(path, n_titles=DEFAULT_TITLES, seed=SEED, min_words=0, unici=No
 
 
 def normalize(X):
-    """X / ||X||, cosi' la similarita' coseno e' il puro prodotto scalare.
+    """X / ||X||, so that cosine similarity is the pure dot product.
 
-    Nessuna guardia sulla divisione per zero: sui dati veri la norma minima e' 0,36 e
-    `n_words` non e' mai 0 (verificato). La regola del repo e' aggiungere pulizia dopo
-    averne misurato la necessita'.
+    No guard against division by zero: on the real data the minimum norm is 0.36 and
+    `n_words` is never 0 (verified). The repo's rule is to add cleanup after
+    measuring that it's actually needed.
     """
     return X / np.linalg.norm(X, axis=1, keepdims=True)
 
 
-# ----------------------------------------------------------------------------------
-# Il cuore: le piastrelle.
-# ----------------------------------------------------------------------------------
+# The core: the tiles.
 
 
 def split_rows(n, k):
-    """Le n righe in k fette contigue -> [(inizio, fine), ...]."""
+    """The n rows in k contiguous slices -> [(start, end), ...]."""
     k = max(1, min(int(k), n))
     return [(i * n // k, (i + 1) * n // k) for i in range(k)]
 
 
 def block_pairs(k):
-    """Le piastrelle da calcolare: solo i <= j, perche' S e' simmetrica. Meta' lavoro."""
+    """The tiles to compute: only i <= j, because S is symmetric. Half the work."""
     return [(i, j) for i in range(k) for j in range(i, k)]
 
 
 def top_block(A, B, offset_a, offset_b, top=TOP_N, bins=BINS):
-    """UNA piastrella: la calcola e la riduce subito -> (tabella di 2*top righe, istogramma).
+    """A tile: compute it and reduce it immediately -> (table of 2*top rows, histogram).
 
-    La riduzione e' il motivo per cui il task e' fattibile: la piastrella e' milioni di
-    numeri, quello che esce sono 40 righe e 100 conteggi.
+    The reduction is the reason the task is feasible: the tile is millions of
+    numbers, what comes out is 40 rows and 100 counts.
 
-    Sulla DIAGONALE (offset_a == offset_b) si tiene solo il triangolo alto stretto: la
-    diagonale vera e' ogni titolo con se stesso (1,0 garantito) e il triangolo basso e'
-    la ripetizione dello stesso. Si estraggono i valori invece di azzerarli, perche' gli
-    zeri finirebbero nell'istogramma e nei minimi - e i minimi veri sono vicini a zero.
+    On the DIAGONAL (offset_a == offset_b) only the narrow upper triangle is kept: the
+    true diagonal is every title with itself (1.0 guaranteed) and the lower triangle is
+    a repeat of the same thing. Values are extracted instead of zeroed out, because the
+    zeros would end up in the histogram and in the minimums - and the real minimums are
+    close to zero.
 
-    PICCO DI MEMORIA, ~12-14 (N/k)^2 byte: la matrice (4 byte/valore) piu' gli indici
-    che `argpartition` e `triu_indices` producono (8 byte l'uno). A 100.000 titoli sono
-    ~550 MB a k=16 e ~140 MB a k=32, e vanno MOLTIPLICATI per i thread del worker, che
-    calcolano piastrelle diverse insieme. E' il muro che rende i k bassi non misurabili.
+    MEMORY PEAK, ~12-14 (N/k)^2 bytes: the matrix (4 bytes/value) plus the indices
+    that `argpartition` and `triu_indices` produce (8 bytes each). At 100,000 titles that's
+    ~550 MB at k=16 and ~140 MB at k=32, and they need to be MULTIPLIED by the worker's
+    threads, which compute different tiles at the same time. It's the wall that makes
+    low k values unmeasurable.
     """
     S = A @ B.T
 
@@ -218,19 +185,19 @@ def top_block(A, B, offset_a, offset_b, top=TOP_N, bins=BINS):
     else:
         valori = S.ravel()
 
-    # Il coseno di due vettori normalizzati sta in [-1, 1] per definizione, ma in float32
-    # due vettori identici danno 1.0000001: senza questo taglio quelle coppie cadono FUORI
-    # dal range dell'istogramma e spariscono dal conteggio. In-place, quindi gratis.
+    # The cosine of two normalized vectors lies in [-1, 1] by definition, but in float32
+    # two identical vectors give 1.0000001: without this clamp those pairs fall OUTSIDE
+    # the histogram range and disappear from the count. In-place, so it's free.
     np.clip(valori, -1.0, 1.0, out=valori)
     conteggi = np.histogram(valori, bins=bins, range=(-1.0, 1.0))[0]
 
-    quanti = min(top, valori.size)                 # piastrelle minuscole nelle prove locali
+    quanti = min(top, valori.size)                 # little tiles for local tries
     alti = np.argpartition(valori, -quanti)[-quanti:]
     bassi = np.argpartition(valori, quanti - 1)[:quanti]
     scelte = np.concatenate([alti, bassi])
 
-    # Dagli indici LOCALI della piastrella a quelli globali del campione: e' l'unico posto
-    # in cui i blocchi hanno bisogno di sapere dove stavano.
+    # From the tile's LOCAL indices to the sample's global ones: it's the only place
+    # where the blocks need to know where they stood.
     if offset_a == offset_b:
         r, c = righe[scelte], colonne[scelte]
     else:
@@ -240,10 +207,10 @@ def top_block(A, B, offset_a, offset_b, top=TOP_N, bins=BINS):
 
 
 def merge(pezzi, top=TOP_N):
-    """Il reduce: le classifiche delle piastrelle -> la classifica globale.
+    """The reduce: the rankings of the tiles -> the global ranking.
 
-    Esatto e non approssimato: una coppia che non e' fra le prime `top` della sua
-    piastrella non puo' essere fra le prime `top` di tutte.
+    Exact and not approximated: a pair that is not among the first `top` of its
+    tile cannot be among the first `top` of all.
     """
     tabella = pd.concat([frame for frame, _ in pezzi], ignore_index=True)
     conteggi = np.sum([c for _, c in pezzi], axis=0)
@@ -253,10 +220,10 @@ def merge(pezzi, top=TOP_N):
 
 
 def build(client, X, k=DEFAULT_BLOCKS, top=TOP_N, bins=BINS):
-    """Il grafo completo. Lazy: niente viene calcolato qui.
+    """The complete graph. Lazy: nothing is calculated here.
 
-    `scatter` spedisce i k blocchi ai worker UNA VOLTA; ogni piastrella poi ne riusa due.
-    Senza, gli stessi megabyte viaggerebbero dentro il grafo a ogni task.
+    `scatter` sends the k blocks to the workers ONCE; each tile then reuses two.
+    Without this, the same megabytes would travel through the graph with every task.
     """
     tagli = split_rows(len(X), k)
     blocchi = client.scatter([X[a:b] for a, b in tagli])
@@ -265,10 +232,7 @@ def build(client, X, k=DEFAULT_BLOCKS, top=TOP_N, bins=BINS):
     return delayed(merge)(pezzi, top)
 
 
-# ----------------------------------------------------------------------------------
-# La consegna: sul client, su 40 righe. Fuori dal cronometro.
-# ----------------------------------------------------------------------------------
-
+# The handoff: on the client, on 40 rows. Outside the timer.
 
 def attach_titles(coppie, uid, papers):
     """Indici del campione -> cord_uid -> titoli. Senza, l'output e' due codici opachi."""
@@ -285,8 +249,8 @@ def attach_titles(coppie, uid, papers):
 
 
 def histogram_plot(conteggi, path, titolo):
-    """L'unica figura del task: dove sta la massa delle similarita', e quanto sono
-    lontane le code che abbiamo consegnato."""
+    """The task's only figure: where the mass of the similarities lies, and how far
+apart the tails we delivered are."""
     import matplotlib
 
     matplotlib.use("Agg")                      # nessuno schermo sulla VM
@@ -306,7 +270,8 @@ def histogram_plot(conteggi, path, titolo):
     plt.close(fig)
 
 
-# ----------------------------------------------------------------------------------
+# CLI arguments for the cosine-similarity task: sample size, block count for
+# partitioning, and the optional title-quality filters (min-parole, solo-unici).
 
 
 def parse_args():
@@ -344,7 +309,7 @@ def parse_args():
 def main():
     args = parse_args()
 
-    # I percorsi relativi si risolvono sulla radice della repo, non sulla cartella da cui lanci
+    # Relative paths are resolved against the repo root, not the folder you launch from
     repo = Path(__file__).resolve().parent.parent
     sys.path.insert(0, str(repo))
     from cluster import get_client
@@ -356,9 +321,9 @@ def main():
     source, papers, out = risolvi(args.input), risolvi(args.papers), risolvi(args.out)
     if not embedding_files(source):
         raise SystemExit(f"Nessun file .parquet in {source}")
-    # I titoli servono solo alla fine, ma si controlla ADESSO: sul cluster i dati non stanno
-    # dentro la repo, e il default relativo non esiste la'. Scoprirlo dopo il calcolo
-    # significherebbe buttare il calcolo.
+    # The titles are only needed at the end, but the check happens NOW: on the cluster the
+    # data doesn't live inside the repo, and the relative default doesn't exist there.
+    # Finding this out after the computation would mean throwing the computation away.  
     if not list(Path(papers).glob("*.parquet")):
         raise SystemExit(f"Nessun file .parquet in {papers}\n"
                          "Sul cluster passa --papers ~/mapd-data/silver/papers")
@@ -382,9 +347,9 @@ def main():
     print(f"blocchi   : {args.blocchi} da {lato} righe -> "
           f"{args.blocchi * (args.blocchi + 1) // 2} piastrelle da {lato}x{lato}")
 
-    # Dentro il cronometro: `scatter` dei blocchi + tutte le piastrelle + il reduce. Lo
-    # scatter ci sta dentro apposta - e' lavoro distribuito e il suo costo cresce col
-    # numero di worker, che e' esattamente quello che la curva sui worker deve mostrare.
+    # Inside the timer: `scatter` of the blocks + all the tiles + the reduce. The
+    # scatter belongs inside on purpose - it's distributed work and its cost grows with
+    # the number of workers, which is exactly what the worker curve is meant to show.
     inizio = time.perf_counter()
     try:
         simili, dissimili, conteggi = client.compute(
