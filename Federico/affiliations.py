@@ -1,3 +1,22 @@
+"""Task 2.3.2 - the most and least represented countries and institutions.
+
+Countries and institutions are ranked from the AUTHORS' AFFILIATIONS, with the Dask
+DataFrame instead of the Bag of task 2.3.1.
+
+    silver/authors            one row per (paper, author)
+      |  dropna               an author with no affiliation does not vote
+      |  chiave               the spellings of one entity fall on the same key
+      |  drop_duplicates      (paper, key): a paper counts ONCE per entity
+      v  value_counts         the only shuffle of the job
+
+Counting per PAPER is the primary metric: without the dedup an article with forty
+Italian co-authors would weigh forty times one with a single author. The per-AUTHOR
+count stays in the table next to it, so co-author inflation can be read as a number.
+
+    python Federico/affiliations.py                       # sample, local cluster
+    python Federico/affiliations.py data/silver/authors   # full corpus
+"""
+
 import argparse
 import re
 import sys
@@ -128,7 +147,7 @@ def ranking(authors, column):
     Performs lazy operation
     """
 
-    # Remove columns with missing country or institute affiliation (is a Dask DataFrame)
+    # Remove rows with missing country or institute affiliation (is a Dask DataFrame)
     valid = authors[["cord_uid", column]].dropna(subset=[column])
 
     # Get unique values from the selected column and the corresponding frequency
@@ -246,8 +265,8 @@ def main():
     #   [
     #       per_paper_country,
     #       per_autore_country,
-    #       per_autore_institution
     #       per_paper_institution,
+    #       per_autore_institution
     #   ]
     # The idea is to compute the four graphs simoultaneously to share common operations and read the files just one time
     lazy = [serie for column in AFFILIAZIONI.values() for serie in ranking(authors, column)]

@@ -1,3 +1,19 @@
+"""Task 2.3.4 - cosine similarity between all the pairs of titles.
+
+Normalising the vectors ONCE makes both denominators 1, so "all the pairs" is not a
+double loop: it is the matrix product S = X @ X.T, which NumPy hands to BLAS. The N rows
+are cut into k blocks, and the TILE (i, j) is X[i] @ X[j].T - a task that needs nobody
+else. S is symmetric, so only the tiles with i <= j are computed: k(k+1)/2 tasks.
+
+The result is BIGGER than the input: at 100,000 titles the vectors are 120 MB but S
+would be 40 GB. It is not written and it is not needed - the assignment asks to IDENTIFY
+a few extreme pairs, not to keep them all. So every tile REDUCES IN PLACE (top 20,
+bottom 20, histogram) and gives back 40 rows instead of millions of numbers. It is
+exact: the globally most similar pair is necessarily the most similar one of its tile.
+
+    python nicco_scripts/cosine.py nicco_scripts/embeddings --titoli 100000 --out ~/mapd-out/2_3_4
+"""
+
 import argparse
 import os
 import sys

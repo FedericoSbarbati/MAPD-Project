@@ -1,3 +1,18 @@
+"""Benchmark of task 2.3.4: runtime vs number of partitions and vs number of workers.
+
+In 2.3.1 and 2.3.2 the work is Python code, the GIL puts it in a queue and processes
+win. HERE the work is a matrix multiplication inside BLAS, which is C and RELEASES the
+GIL, so threads should work in parallel for real. BLAS itself is pinned to one thread
+(`cosine.single_thread_blas()`): otherwise four workers multiplying together would be
+sixteen threads on four cores, and this campaign would measure that chaos instead of Dask.
+
+Timed: the scatter of the blocks, all the tiles, and the reduce. The NumPy single-core
+baseline goes into the CSV as the curva="numpy" row, doing exactly the same work.
+
+    python nicco_scripts/bench_cosine.py --titoli 5000 --out /tmp/bench-2_3_4   # rehearsal
+    python nicco_scripts/bench_cosine.py nicco_scripts/embeddings --ripetizioni 3
+"""
+
 import argparse
 import csv
 import sys

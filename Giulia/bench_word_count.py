@@ -1,3 +1,12 @@
+"""Benchmark of task 2.3.1: runtime vs partitions, vs workers, vs threads per worker.
+
+One row of the CSV = one measurement = a brand new cluster, so that every point starts
+from freshly born workers instead of workers worn out by the previous measurement.
+
+    python Giulia/bench_word_count.py --out /tmp/bench-prova --timeout 300   # rehearsal
+    python Giulia/bench_word_count.py ~/mapd-data/silver/paragraphs --thread 1 --ripetizioni 3
+"""
+
 import argparse
 import csv
 import os
@@ -46,7 +55,7 @@ def campagna(disponibili, thread=None, ripetizioni=1):
     def punto(curva, valore, **cambiato):
         '''
         Creates a dictionary with default value and changes with the one updated at the moment:
-        - curva: an element from list COLONNE
+        - curva: name of the curve (riferimento, partizioni, worker, thread, foldby)
         - valore: value associated to the curve
         - ** cambiato: dictionary unpacking (adds the value to the returned dictionary)
         
@@ -135,7 +144,7 @@ def cronometra(client, collezioni, timeout):
 
     # Loop that's executed just in case of failures (otherwise futures has len == 1 and future.result() = None)
     for future in futures:
-        future.result()  # Start the work again if it dies on the cluster
+        future.result()  # Store the result of the future into the variable (if it fails, it raises an exception)
 
     return round(time.perf_counter() - inizio, 1)
 
@@ -199,7 +208,7 @@ def misura(p, files, args):
         # (The code is not into the snapshot used to start the VM and it's usually updated, surely there is a smarter way to solve the problem but this works...)
         client.upload_file(str(CODICE))
 
-        # Creating the output directory into every worker (the results are stored into their memory)
+        # Creating the output directory into every worker (the results are stored into their local disk, not into the shared filesystem)
         client.run(os.makedirs, str(vocabolario), exist_ok=True)
 
         # Creation of the lazy computational graph

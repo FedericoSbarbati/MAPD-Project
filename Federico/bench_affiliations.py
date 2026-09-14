@@ -1,3 +1,14 @@
+"""Benchmark of task 2.3.2: runtime vs number of partitions and vs number of workers.
+
+silver/authors is 34 MB and 2.9 million rows, and the same work in pandas on one core
+takes fractions of a second: these curves measure the COST OF COORDINATION, not the
+computation. Hence one cluster per worker count (and not one per measurement), and the
+pandas single-core baseline written into the CSV as the curva="pandas" row.
+
+    python Federico/bench_affiliations.py --out /tmp/bench-2_3_2            # rehearsal
+    python Federico/bench_affiliations.py ~/mapd-data/silver/authors --ripetizioni 3
+"""
+
 import argparse
 import csv
 import sys

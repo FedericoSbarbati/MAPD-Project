@@ -1,3 +1,16 @@
+"""Task 2.3.1 - distributed word count over the CORD-19 body text.
+
+    Map phase     for each document D, emit ((D, w), cp(w)), where cp(w) is how many
+                  times the word w occurs inside D
+    Reduce phase  for each word w, sum cp(w) over every document -> c(w)
+
+The same file runs unchanged on the Mac and on Cloud Veneto: where the computation
+happens is decided by cluster.txt, never by editing the code (see cluster.py).
+
+    python Giulia/word_count.py                          # sample data, local cluster
+    python Giulia/word_count.py data/silver/paragraphs   # full corpus
+"""
+
 import argparse
 import operator
 import os

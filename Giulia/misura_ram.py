@@ -1,3 +1,12 @@
+"""How much RAM ONE word count task needs, and in which step it is spent.
+
+No cluster here: one single sequential process, so what is measured is the cost of one
+task with no other task around to dirty the number. It is what explains the
+KilledWorker of the small k values in the partition curve.
+
+    python Giulia/misura_ram.py ~/mapd-data/silver/paragraphs
+"""
+
 import argparse
 import concurrent.futures as futures
 import gc
