@@ -1,10 +1,10 @@
-"""Benchmark del task 2.3.4. Un comando, e la campagna gira da sola.
+"""Benchmark del task 2.3.4. Un comando per l'avvio e il codice gira da solo.
 
-    python nicco_scripts/bench_cosine.py nicco_scripts/embeddings --ripetizioni 3
+    python Niccolo/bench_cosine.py Niccolo/embeddings --ripetizioni 3
 
 Le due curve obbligatorie - tempo vs numero di PARTIZIONI e tempo vs numero di WORKER
 ("at least the number of dataset partitions and the number of executors/processing units",
-InstructionsAndGuidelines punto 5) - piu' una terza che qui NON e' un contorno.
+InstructionsAndGuidelines punto 5).
 
 L'IPOTESI, SCRITTA PRIMA DI MISURARE. Nel 2.3.1 e nel 2.3.2 il lavoro e' codice Python, il
 GIL lo mette in fila, e i processi vincono: a parita' di core 8x1 batte 4x2 di 1,33x e il
@@ -36,7 +36,7 @@ quindi ripetere la lista degli host mette piu' processi sulla stessa macchina, e
 
     W=ip_worker1,ip_worker2,ip_worker3,ip_worker4
     CORD19_HOSTS="ip_scheduler,$W,$W" CORD19_WORKER_MEMORY_LIMIT=3.5GB \
-        python nicco_scripts/bench_cosine.py ~/mapd-data/embeddings \
+        python Niccolo/bench_cosine.py ~/mapd-data/embeddings \
             --only worker --worker 8 --thread 1 --k 32 --ripetizioni 3
 
 `CORD19_WORKER_MEMORY_LIMIT` NON e' opzionale: il default e' una frazione della RAM di
@@ -46,7 +46,7 @@ una piastrella costa ~12-14 (titoli/k)^2 byte, per il numero di thread del worke
 
 Prova generale prima di occupare il cluster:
 
-    python nicco_scripts/bench_cosine.py --titoli 5000 --out /tmp/bench-2_3_4
+    python Niccolo/bench_cosine.py --titoli 5000 --out /tmp/bench-2_3_4
 """
 
 import argparse
@@ -55,39 +55,24 @@ import sys
 import time
 from pathlib import Path
 
-# I worker devono poter importare il modulo del task: la radice della repo nel sys.path
+# Gli worker importano il modulo della task: la radice della cartella nel sys.path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
-sys.path.insert(0, str(REPO / "nicco_scripts"))
+sys.path.insert(0, str(REPO / "Niccolo"))
 
 import cosine as cs  # noqa: E402
 from cluster import available_workers, get_client  # noqa: E402
 
-# Il file spedito ai worker: i dati si scatterano, il codice no
-CODICE = REPO / "nicco_scripts" / "cosine.py"
+# Il file viene spedito agli worker: i dati si scatterano ma non il codice
+CODICE = REPO / "Niccolo" / "cosine.py"
 
 DEFAULT_INPUT = cs.DEFAULT_INPUT
 DEFAULT_OUT = "~/mapd-out/bench_2_3_4"
 
-# Lo sweep sulle partizioni, ORDINATO DAL RIFERIMENTO VERSO I BORDI e non per valore
-# crescente: dentro una forma di cluster le misure si susseguono, e un k che sfonda la
-# memoria fa intervenire la nanny sul worker. Se quel k viene per primo, le misure dopo di
-# lui girano su un cluster appena riavviato. I fragili in fondo, quindi, dove al massimo si
-# portano via se stessi - stessa regola dell'ordine di campagna del 2.3.1.
-# NIENTE 1 e 2: il picco di una piastrella va come (titoli/k)^2, quindi a 100.000 titoli
-# k=2 chiederebbe ~30 GB per task. I k bassi non sono lenti, sono IRREALIZZABILI.
-# Il 128 c'e' perche' su worker da 7,1 GB con 4 thread il 4 e l'8 sfondano: senza,
-# la curva avrebbe due punti validi su quattro. A destra il muro non esiste (il picco
-# va come 1/k^2) e si misura l'altro estremo, i task troppo piccoli.
-#
-# k=8 E k=4 SONO USCITI DALLO SWEEP, e sono comunque nel CSV: li ha misurati la
-# calibrazione sul cluster del 2026-09-12, a 100.000 titoli su 4 worker x 4 thread.
-# `k=8` -> KilledWorker su tutti e quattro i worker; `k=4` -> FutureCancelledError, e la
-# riga registra `worker=3`, cioe' il cluster NON si era ripreso dal punto precedente. Il
-# muro e' un fatto binario, non una misura con dispersione: ripeterlo a ogni passata
-# costerebbe minuti e lascerebbe un cluster degradato ai punti dopo di lui. Per rimetterlo
-# (altri titoli -> altro muro) basta aggiungerlo qui in fondo, dov'era.
-BLOCCHI = (16, 32, 64, 128)
+# Lo sweep sulle partizioni. NIENTE 1 e 2: il picco di memoria di una piastrella va come
+# (titoli/k)^2, quindi a 100.000 titoli k=2 chiederebbe ~30 GB per task. I k bassi
+# sono IRREALIZZABILI, ed e' lo stesso muro misurato nel 2.3.1 a k=32, è un problema di memoria
+BLOCCHI = (4, 8, 16, 32, 64)
 
 # I punti della curva sui thread. Espliciti e non "quanti core ha il nodo", perche' qui il
 # numero di thread E' la variabile misurata.
@@ -95,15 +80,8 @@ THREAD = (1, 2, 4)
 
 CURVE = ("partizioni", "worker", "thread")
 
-COLONNE = ["curva", "valore", "ripetizione", "misura", "secondi", "errore",
+COLONNE = ["curva", "valore", "ripetizione", "secondi", "errore",
            "titoli", "partizioni", "worker", "thread"]
-
-# `misura` e' la chiave dei due esperimenti del 2026-09-13, e va letta cosi':
-#   misura=0   PRIMA volta che quel k gira in quel cluster -> paga lo `scatter` dei blocchi
-#   misura>0   i blocchi sono gia' sui worker (Dask li nomina con l'hash del contenuto)
-# La differenza fra le due e' il COSTO DI DISTRIBUIRE I DATI, isolato per sottrazione.
-# La dispersione fra le misura>0 dello stesso cluster e' invece varianza A CLUSTER FERMO:
-# separa il rumore della macchina da quello dell'accensione.
 
 # Lo scheduler nasce sempre sulla porta 8786 (cluster.py), quindi il cluster successivo la
 # trova occupata se il precedente non l'ha ancora rilasciata: "OSError: [Errno 98] Address
@@ -115,7 +93,7 @@ def cronometra(client, X, k, top, bins):
     """Quanto ci mette il cluster a produrre le due classifiche e l'istogramma.
 
     `build` sta DENTRO il cronometro, al contrario del 2.3.2 dove il grafo si costruiva
-    fuori: qui costruirlo significa spedire i blocchi ai worker, che e' lavoro vero.
+    fuori: qui costruirlo significa spedire i blocchi agli worker, che e' il vero lavoro da misurare.
     """
     inizio = time.perf_counter()
     client.compute(cs.build(client, X, k, top, bins), sync=True)
@@ -130,7 +108,8 @@ def stato_cluster(client):
 
 
 def baseline_numpy(X, k, top, bins):
-    """Lo stesso lavoro su un core solo, senza Dask: il metro di paragone.
+    """Lo stesso lavoro su un core solo, senza Dask: il metro di paragone, serve da standard per accertarci
+    dello speedup ottenuto.
 
     Stesse piastrelle, stesso k, stessa riduzione, stesso istogramma - solo in fila invece
     che in parallelo. Cambiare k cambierebbe il lavoro, non solo la sua distribuzione.
@@ -145,7 +124,7 @@ def baseline_numpy(X, k, top, bins):
 
 
 def scrivi_riga(percorso, riga):
-    """Una riga di CSV per misura, in append: una campagna interrotta lascia i suoi dati."""
+    """Una riga di CSV per misura, in append: una campagna interrotta non compromette i suoi dati."""
     nuovo = not percorso.exists()
     with open(percorso, "a", newline="") as fh:
         scrittore = csv.DictWriter(fh, fieldnames=COLONNE, extrasaction="ignore", restval="")
@@ -155,8 +134,8 @@ def scrivi_riga(percorso, riga):
 
 
 def misura(client, X, k, top, base):
-    """Una misura: il cronometro, e gli errori come stringa invece che come interruzione
-    della campagna. Un k che sfonda la memoria e' un dato, non un incidente."""
+    """Funzione per cronometrare il lavoro, gli errori vengono catturati come stringa invece che come interruzioni
+    della campagna. Un k che sfonda la memoria e' un dato da salvare, non un incidente di percorso."""
     riga = dict(base, titoli=len(X), partizioni=k, secondi=None, errore="")
     riga.update(stato_cluster(client))
     try:
@@ -166,8 +145,8 @@ def misura(client, X, k, top, base):
     return riga
 
 
-def campagna(disponibili, k_riferimento, thread, curve=None, quali_worker=None, ripeti=1):
-    """Le FORME DI CLUSTER da accendere, e cosa misurare dentro ciascuna.
+def campagna(disponibili, k_riferimento, thread, curve=None, quali_worker=None):
+    """Le FORME DI CLUSTER da accendere e cosa misurare dentro ciascuna.
 
     -> {(worker, thread): [(curva, k), ...]}
 
@@ -191,8 +170,7 @@ def campagna(disponibili, k_riferimento, thread, curve=None, quali_worker=None, 
 
     forme = {}
     for curva, worker, thread_, k in punti:
-        # `ripeti` misure CONSECUTIVE dello stesso punto: la prima fredda, le altre calde
-        forme.setdefault((worker, thread_), []).extend([(curva, k)] * ripeti)
+        forme.setdefault((worker, thread_), []).append((curva, k))
     return forme
 
 
@@ -223,18 +201,6 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=cs.SEED,
                         help=f"il seed del campione (default {cs.SEED}): tutte le misure "
                              "devono guardare gli stessi titoli")
-    parser.add_argument("--ripeti-punto", type=int, default=1, metavar="N",
-                        help="misura ogni punto N volte DI FILA dentro lo stesso cluster "
-                             "(default 1). La prima misura paga lo `scatter` dei blocchi e "
-                             "le altre no, quindi la differenza isola il costo di "
-                             "distribuire i dati; e la dispersione fra le misure calde e' "
-                             "varianza a cluster fermo, che separa il rumore della macchina "
-                             "da quello dell'accensione. Colonna `misura` nel CSV")
-    parser.add_argument("--no-baseline", action="store_true",
-                        help="salta il baseline NumPy su un core. Costa ~102 s a passata ed "
-                             "e' gia' misurato dieci volte (102,55 +- 0,67 s): in una "
-                             "campagna che ripete un punto solo sarebbe la maggior parte "
-                             "del tempo")
     parser.add_argument("--only", nargs="+", metavar="CURVA", choices=CURVE,
                         help=f"rilancia solo queste curve: {' '.join(CURVE)} (default: tutte)")
     parser.add_argument("--worker", nargs="+", type=int, metavar="N",
@@ -257,8 +223,7 @@ def main():
         raise SystemExit(f"Nessun file .parquet in {source}")
 
     disponibili = available_workers(REPO)
-    forme = campagna(disponibili, args.k, args.thread, args.only, args.worker,
-                     args.ripeti_punto)
+    forme = campagna(disponibili, args.k, args.thread, args.only, args.worker)
     if not forme:
         raise SystemExit("La selezione non contiene nessuna misura: controlla --only e --worker")
 
@@ -280,16 +245,14 @@ def main():
     inizio = time.perf_counter()
 
     for ripetizione in range(args.ripetizioni):
-        if not args.no_baseline:
-            secondi = baseline_numpy(X, args.k, args.top, cs.BINS)
-            scrivi_riga(percorso_csv, {"curva": "numpy", "valore": 1, "misura": 0,
-                                       "ripetizione": ripetizione, "secondi": secondi,
-                                       "errore": "", "titoli": len(X),
-                                       "partizioni": args.k, "worker": 1, "thread": 1})
-            print(f"\n[{ripetizione}] numpy, un core: {secondi} s")
+        secondi = baseline_numpy(X, args.k, args.top, cs.BINS)
+        scrivi_riga(percorso_csv, {"curva": "numpy", "valore": 1, "ripetizione": ripetizione,
+                                   "secondi": secondi, "errore": "", "titoli": len(X),
+                                   "partizioni": args.k, "worker": 1, "thread": 1})
+        print(f"\n[{ripetizione}] numpy, un core: {secondi} s")
 
-        # Un cluster per FORMA (worker x thread): si accende una volta e ci si misura dentro
-        # tutto quello che quella forma deve dare.
+        # Un cluster per SHAPE (worker x thread): si accende una volta e si misura dentro
+        # tutto quello che quella SHAPE deve dare.
         for (worker, thread), punti in forme.items():
             client = cluster = None
             try:
@@ -298,30 +261,26 @@ def main():
                                              n_threads=thread)
                 client.upload_file(str(CODICE))
 
-                viste = {}
                 for curva, k in punti:
                     valore = k if curva == "partizioni" else (worker if curva == "worker"
                                                               else thread)
-                    indice = viste.get((curva, k), 0)
-                    viste[(curva, k)] = indice + 1
-                    base = {"curva": curva, "valore": valore, "ripetizione": ripetizione,
-                            "misura": indice}
+                    base = {"curva": curva, "valore": valore, "ripetizione": ripetizione}
                     riga = misura(client, X, k, args.top, base)
                     scrivi_riga(percorso_csv, riga)
-                    print(f"[{ripetizione}] {curva}={riga['valore']:<5} misura={indice} "
+                    print(f"[{ripetizione}] {curva}={riga['valore']:<5} "
                           f"worker={riga['worker']} thread={riga['thread']} "
                           f"partizioni={riga['partizioni']} -> "
                           f"{riga['secondi']} s {riga['errore']}")
 
             # Un cluster che non nasce non deve portarsi via la campagna: le sue misure
-            # diventano righe con l'errore, e si passa alla forma dopo.
+            # diventano righe con l'errore, e si passa alla shape dopo.
             except Exception as errore:
                 detto = f"{type(errore).__name__}: {errore}"[:200]
                 for curva, k in punti:
                     scrivi_riga(percorso_csv,
                                 {"curva": curva, "valore": k, "ripetizione": ripetizione,
-                                 "misura": 0, "secondi": None, "errore": detto,
-                                 "titoli": len(X), "partizioni": k, "worker": worker})
+                                 "secondi": None, "errore": detto, "titoli": len(X),
+                                 "partizioni": k, "worker": worker})
                 print(f"[{ripetizione}] worker={worker}: CLUSTER FALLITO  {detto}")
             finally:
                 if client is not None:
