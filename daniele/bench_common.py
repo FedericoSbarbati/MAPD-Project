@@ -7,15 +7,14 @@ Three campaign scripts import from here:
     bench_knobs.py     the knobs specific to this task: blocksize, split_out, broadcast
 
 They differ only in WHICH points they measure. Everything else - starting a cluster,
-timing one configuration, reading the memory peak, appending the row - lives here, once.
-That is the same reason `cluster.py` exists at the repository root: the code that every
-task shares is written in one place, not copied.
+timing one configuration, reading the memory peak, appending the row - is written here
+once instead of three times.
 
 THE RULE THAT HOLDS EVERYTHING TOGETHER: one row of the CSV = one measure = a brand new
-cluster. It costs about a minute per point and in exchange every measure starts from
-freshly born workers. That is not fussiness: on this cluster a worker that has already
-chewed through millions of strings keeps RSS by allocator fragmentation
-(PROJECT_CONTEXT.md section 7), so reusing one would add wear to whatever we are measuring.
+cluster. It costs about a minute per point, and in exchange every measure starts from
+freshly born workers. That is not fussiness: a worker that has already chewed through
+millions of strings keeps RSS it is no longer using (the allocator does not give it back),
+so reusing one would add wear to whatever we are measuring.
 """
 
 import csv
@@ -72,8 +71,8 @@ def available_machines(repo_root=REPO):
 
     Reads cluster.txt exactly like the task does, then REMOVES DUPLICATES from the worker
     list: cluster.txt may already repeat an address, but here we want the list of
-    physical machines, because how many processes to put on each one is a decision the
-    campaign makes point by point.
+    physical machines. How many processes to put on each one is a decision the campaign
+    makes point by point.
 
     Must be called ONCE, at startup, before any campaign sets CORD19_HOSTS - otherwise it
     would read back its own choice instead of the file.
@@ -98,7 +97,7 @@ def assign_processes(n_workers, machines):
     UNEVEN - Dask hands out work assuming the workers are equivalent, so an uneven point
     bends the curve for a reason that has nothing to do with the algorithm. The campaigns
     therefore prefer multiples of the number of machines, and `per_machine` ends up in
-    the CSV so that an uneven point can be recognised months later.
+    the CSV so that an uneven point can be recognised later.
     """
     return [machines[i % len(machines)] for i in range(n_workers)]
 
@@ -136,9 +135,9 @@ def configure_topology(n_workers, scheduler, machines):
 def memory_peak(client):
     """The highest RSS each worker reached during this measure. -> {peak_gb, mean_peak_gb}
 
-    `ru_maxrss` is the historical maximum of the process, and since every measure starts a
-    NEW cluster, that historical maximum IS this measure's peak. No sampling, no watchdog:
-    the "one cluster per row" rule pays for itself here too.
+    `ru_maxrss` is the historical maximum of the process. Since every measure starts a NEW
+    cluster, that historical maximum IS this measure's peak: no sampling and no watchdog
+    are needed.
 
     `peak_gb` is the busiest worker, and it is the number that matters: it is what the
     nanny compares against the limit when it decides whether to kill somebody.
@@ -164,9 +163,9 @@ def cluster_state(client):
     """How many workers and threads are REALLY there now, not how many were asked for.
 
     `client.nthreads()` and NOT `client.scheduler_info()["workers"]`: the second one
-    UNDER-COUNTS when several workers share a machine - exactly our case when we pack two
-    processes per machine - and it never corrects itself. It has already branded
-    "5 workers" two campaigns that had 8 and 16.
+    UNDER-COUNTS when several workers share a machine, which is exactly our case when we
+    pack two processes per machine, and it never corrects itself. It has already reported
+    5 workers for campaigns that really had 8 and 16.
     """
     threads = client.nthreads()
     return {"real_workers": len(threads), "real_threads": sum(threads.values())}
@@ -175,10 +174,10 @@ def cluster_state(client):
 def measure(point, args, scheduler, machines):
     """Start a cluster, time ONE configuration, shut it down. -> the CSV row.
 
-    A single try/except, covering both a cluster that fails to start and a computation
-    that dies: from the outside they are the same thing, a point that is not there. A
-    failure is a datum, not a catastrophe - "it did not complete" is a row of the table,
-    and on the partition curve it is THE result (it is where the memory wall is).
+    A single try/except covers both a cluster that fails to start and a computation that
+    dies: from the outside they are the same thing, a point that is not there. A failure
+    is written down like any other row, because on the partition curve "it did not
+    complete" IS the result: it marks where the memory wall is.
 
     The stopwatch covers BOTH phases of the task, vocabulary included: the pipeline is not
     fully lazy, and timing only the second half would mean timing something we do not
@@ -205,11 +204,9 @@ def measure(point, args, scheduler, machines):
         # 3. Send the code. The data is replicated on every machine, the code is not: it
         #    only exists on the one we launch from. But in the graph we ship, functions
         #    travel BY NAME, so scheduler and workers must be able to import this module.
-        #    -> PROJECT_CONTEXT.md section 8.12a
         client.upload_file(str(CODE))
         # 4. Create the output directory ON EVERY MACHINE: `to_parquet` creates it here on
         #    the client, but the workers are the ones writing, each on its own disk.
-        #    -> PROJECT_CONTEXT.md section 8.12b
         client.run(os.makedirs, str(destination), exist_ok=True)
 
         with performance_report(filename=str(report), mode="inline"):
@@ -248,7 +245,8 @@ def measure(point, args, scheduler, machines):
 def write_row(path, row):
     """Append one measure to the CSV. Immediately, not at the end of the campaign.
 
-    It is the difference between losing a night and losing the last measure.
+    A campaign runs for hours. Writing as we go means that if it dies at 3am, everything
+    measured until then is already on disk.
     """
     is_new = not path.exists()
     with open(path, "a", newline="") as fh:
@@ -266,8 +264,9 @@ def write_row(path, row):
 def base_point(campaign, label, **changed):
     """One point of a campaign: the reference configuration with something changed.
 
-    Every campaign is written as "the reference, with ONE knob turned". That is the
-    experimental method, and it is why each campaign file is a list and not an algorithm.
+    Every campaign is written as "the reference, with ONE knob turned". Changing one thing
+    at a time is what makes a difference in the result attributable to that thing, and it
+    is why each campaign file is a plain list of points rather than an algorithm.
     """
     base = {"campaign": campaign, "point": label,
             "worker": None, "thread": None,            # filled in by the campaign
@@ -345,8 +344,8 @@ def repeat_passes(points, repetitions):
 
     THE REPETITIONS ARE WHOLE PASSES, not consecutive measures of the same point. It costs
     the same and says more: hours pass between two repetitions of one point, so the spread
-    we measure includes how the machine varies during the day, not just how two runs
-    glued together differ. And if the night is interrupted, what is left in hand is a
-    COMPLETE campaign rather than half a curve measured three times.
+    we measure includes how the machine varies during the day, not just how two runs glued
+    together differ. And if the night is interrupted, what is left in hand is a COMPLETE
+    campaign rather than half a curve measured three times.
     """
     return [dict(p, repetition=r) for r in range(repetitions) for p in points]

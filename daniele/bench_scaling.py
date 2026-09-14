@@ -2,9 +2,9 @@
 
     python daniele/bench_scaling.py ~/mapd-data/silver/papers
 
-This is the biggest campaign and the one that answers the two questions the course
-requires: how the time depends on the number of partitions and on the number of
-processing units.
+This is the biggest campaign, and the one that answers the two questions we have to
+answer: how the time depends on the number of partitions, and how it depends on the
+number of processing units.
 
 WHAT IT MEASURES: a GRID - every number of workers crossed with every number of
 partitions, always with ONE thread per worker. One grid, three figures:
@@ -35,9 +35,7 @@ import bench_common as bc
 
 # How many worker PROCESSES to try. With 3 machines of 2 cores each:
 #   1, 2, 3  -> one process per machine, the classic speedup curve
-#   6        -> two per machine, i.e. one process per core: on the word count campaign
-#               this was the configuration that won by far (16 processes gave 11.6x,
-#               the same 16 cores as 4x4 threads gave 2.4x)
+#   6        -> two per machine, i.e. one process per core
 # Multiples of the number of machines come first because they are the balanced ones: 4 or
 # 5 processes on 3 machines means somebody carries two and the others one, and Dask hands
 # out work assuming the workers are equivalent.

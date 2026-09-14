@@ -2,10 +2,10 @@
 
     python daniele/bench_knobs.py ~/mapd-data/silver/papers
 
-`bench_scaling.py` and `bench_threads.py` ask questions that any distributed task would
-ask - more processes, more threads, more partitions. This one asks the three questions
-that only the title-embedding task can ask, and they are the ones worth defending at the
-oral, because each is a decision somebody had to take while writing the code.
+`bench_scaling.py` and `bench_threads.py` ask questions any distributed job would ask -
+more processes, more threads, more partitions. This one asks the three questions that only
+the title-embedding job can ask, and each of them is a decision somebody had to take while
+writing the code.
 
     "blocksize"   in what blocks the 4.5 GB model file is read.
                   It is the SECOND width of the graph: the titles are cut by `k`, the
@@ -15,17 +15,15 @@ oral, because each is a decision somebody had to take while writing the code.
                   a fixed cost per task for nothing.
 
     "split_out"   in how many parts the final Reduce comes out.
-                  With 1 a single task holds every embedding at once - the serial tail
-                  that `foldby` produced on the word count, and the same memory ceiling.
+                  With 1 a single task holds every embedding at once: a serial tail, and
+                  a memory ceiling on top of it.
 
     "broadcast"   how the vectors are attached to the words.
-                  True  = the filtered model (~0.2 GB) is handed to every worker, the
+                  True  = the filtered model (~0.11 GB) is handed to every worker, the
                           join happens locally and nothing is shuffled.
                   False = a real distributed join, which shuffles BOTH sides by `word`.
                   After the join every row carries 300 float32, so this is not a detail:
-                  it decides whether several GB cross the network. It is the same choice,
-                  for the same reason, as the prefer-pmc join of the conversion step
-                  (PROJECT_CONTEXT.md section 7, Act 1).
+                  it decides whether several GB cross the network.
 
 All three run at the reference cluster shape, because here we are changing the WORK, not
 who executes it.
@@ -35,8 +33,7 @@ import argparse
 
 import bench_common as bc
 
-# Model block sizes to try, around the 64MB reference. The group who did this project last
-# year found 32-128 MB to be the useful range on their own model, which is the same scale.
+# Model block sizes to try, around the 64MB reference.
 BLOCK_SIZES = ("64MB", "32MB", "128MB", "16MB", "256MB")
 
 # Output partitions of the Reduce. 1 is the interesting extreme: one task holding

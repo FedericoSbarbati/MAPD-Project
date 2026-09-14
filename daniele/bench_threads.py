@@ -10,18 +10,15 @@ which is `bench_scaling.py`.
 THREE GROUPS OF POINTS, three questions:
 
     "thread"       3 workers, 1 / 2 / 4 threads each, at the reference k
-                   -> does adding threads make it faster? (on the word count it did NOT:
-                      +34% instead of the -40% one would expect, because that Map was
-                      pure Python and held the GIL. Here the heavy phase is different -
-                      parsing 600 M floats, which happens inside pandas in C and RELEASES
-                      the GIL - so the answer is genuinely open.)
+                   -> does adding threads make it faster? The answer is not obvious: the
+                      heavy phase here is parsing 600 M floats, which happens inside
+                      pandas in C and RELEASES the GIL, so the threads may well run in
+                      parallel for real.
 
                    The same points read as memory: if the peaks of the N tasks in a
                    worker happened at the same moment, the worker's peak would be N times
-                   the single-task peak. They do not: on the word count 4 threads cost
-                   1.57x, not 4x. The hypothetical "if they summed" line is drawn by the
-                   notebook from the 1-thread measure, so there is nothing extra to
-                   measure here.
+                   the single-task peak. The notebook draws that hypothetical line from
+                   the 1-thread measure, so there is nothing extra to measure here.
 
     "slot"         the same number of concurrent tasks, arranged as processes or as
                    threads: 6 = 6x1 / 3x2 / 1x6, and 2 = 2x1 / 1x2
