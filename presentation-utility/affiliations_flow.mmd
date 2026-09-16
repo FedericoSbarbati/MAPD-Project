@@ -1,0 +1,57 @@
+%%{init: {"flowchart": {"wrappingWidth": 330, "nodeSpacing": 28, "rankSpacing": 40}, "themeVariables": {"fontSize": "15px"}}}%%
+flowchart LR
+    subgraph PLAN["① DRIVER · plans the partitions"]
+        direction TB
+        IN[("silver/authors<br/>192 Parquet files · 2.9 M rows<br/>1 row = 1 author of 1 paper")]
+        FILES["author_files()<br/>paths sorted by part number"]
+        SPLIT["split_evenly(files, k)<br/>k groups of files · default k = 8"]
+        IN --> FILES --> SPLIT
+    end
+
+    subgraph GRAPH["② LAZY GRAPH · runs on the WORKERS only at compute"]
+        direction TB
+        READ["dd.from_map(load_group, groups, meta)<br/>1 group of files → 1 partition<br/>cord_uid · country · institution_norm"]
+
+        subgraph RANK["ranking(authors, column) · for country AND for institution_norm"]
+            direction TB
+            DROP["dropna(column)<br/>no affiliation → no vote"]
+            VCA["value_counts(column)<br/>on the name as written"]
+            KEY["map(chiave)<br/>edge symbols · article · lowercase · accents"]
+            DEDUP["drop_duplicates(cord_uid, chiave)<br/>a paper counts ONCE per key"]
+            VCP["value_counts(chiave)"]
+            PA(["per_autore<br/>name → authors"])
+            PP(["per_paper<br/>key → papers"])
+            DROP --> VCA --> PA
+            DROP --> KEY --> DEDUP --> VCP --> PP
+        end
+
+        READ --> RANK
+    end
+
+    COMPUTE{{"③ dask.compute(4 Series)<br/>TRIGGER · files read once"}}
+
+    subgraph OUT["④ DRIVER · plain pandas"]
+        direction TB
+        CLASS["classifica(per_paper, per_autore)<br/>names grouped by key<br/>label = most frequent name<br/>sorted by papers"]
+        FILESOUT[/"*_ranking.csv<br/>*_top.png · *_bottom.png"/]
+        CLASS --> FILESOUT
+    end
+
+    PLAN --> GRAPH --> COMPUTE --> OUT
+
+    classDef driver fill:#eef2f7,stroke:#5a6b80,color:#1a1a1a
+    classDef worker fill:#e8f3ec,stroke:#2f855a,color:#1a1a1a
+    classDef result fill:#ffffff,stroke:#2f855a,color:#1a1a1a,stroke-width:2px
+    classDef trigger fill:#fdecdf,stroke:#dd6b20,color:#1a1a1a,stroke-width:2px
+    classDef data fill:#ffffff,stroke:#5a6b80,color:#1a1a1a
+
+    class FILES,SPLIT,CLASS,FILESOUT driver
+    class READ,DROP,VCA,KEY,DEDUP,VCP worker
+    class PA,PP result
+    class COMPUTE trigger
+    class IN data
+
+    style PLAN fill:#fafafa,stroke:#9aa5b1
+    style OUT fill:#fafafa,stroke:#9aa5b1
+    style GRAPH fill:#f7fbf8,stroke:#2f855a
+    style RANK fill:#ffffff,stroke:#2f855a,stroke-dasharray:4 3
